@@ -77,6 +77,11 @@ final class IncognitoSession {
     /// incognito windows open. Delete them all — nothing is in use this early, so the
     /// removal API works here; the directory sweep is belt and suspenders.
     static func purgeLeftoverStores() {
+        // fetchAllDataStoreIdentifiers segfaults if it is the process's FIRST WebKit
+        // call: its completion dispatches to WebKit's main RunLoop, which only other
+        // WebKit entry points initialize (verified: bare call crashes 3/3, warmed
+        // call works 3/3). Touching the default store first initializes WebKit.
+        _ = WKWebsiteDataStore.default()
         WKWebsiteDataStore.fetchAllDataStoreIdentifiers { identifiers in
             for identifier in identifiers {
                 WKWebsiteDataStore.remove(forIdentifier: identifier) { _ in

@@ -65,6 +65,9 @@ final class BrowserWindowController: NSWindowController {
         window.titleVisibility = .hidden
         window.title = isPrivate ? "Incognito" : "New Tab"
         window.tabbingIdentifier = isPrivate ? "rocket.private" : "rocket.browser"
+        // Incognito is always dark, regardless of the system appearance. This also
+        // flips the web view's prefers-color-scheme to dark for sites.
+        if isPrivate { window.appearance = NSAppearance(named: .darkAqua) }
         window.toolbarStyle = .unified
         window.delegate = self
         if !window.setFrameUsingName("RocketBrowserWindow") { window.center() }

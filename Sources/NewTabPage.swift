@@ -91,7 +91,7 @@ enum NewTabPage {
             <li>Ads &amp; trackers blocked, always</li>
             <li>Fingerprinting defenses on — screen, hardware &amp; storage hidden</li>
             <li>Global Privacy Control tells sites not to sell your data</li>
-            <li>Searches go to DuckDuckGo</li>
+            <li>Searches go to Brave Search</li>
             <li>No history, no suggestions, nothing saved</li>
         </ul>
     </main>

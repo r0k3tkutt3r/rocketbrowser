@@ -48,9 +48,10 @@ final class ContentBlocker {
 
     /// Installs the enabled rule lists (and the scroll-unlock script) on a web view,
     /// replacing whatever was installed before. Safe to call repeatedly. Incognito
-    /// web views get both rule lists regardless of the user's toggles, plus the
-    /// PrivacyShield scripts — re-added here because this method wipes all user
-    /// scripts, so a settings toggle can never strip incognito protections.
+    /// web views get both rule lists and the PrivacyShield scripts regardless of the
+    /// user's toggles — re-added here because this method wipes all user scripts, so
+    /// a settings toggle can never strip incognito protections. Normal windows get
+    /// PrivacyShield too while "Fingerprinting Protection" is on (the default).
     func apply(to webView: WKWebView, isIncognito: Bool = false) {
         let userContent = webView.configuration.userContentController
         userContent.removeAllContentRuleLists()
@@ -64,7 +65,7 @@ final class ContentBlocker {
                                                    injectionTime: .atDocumentEnd,
                                                    forMainFrameOnly: true))
         }
-        if isIncognito {
+        if isIncognito || PrivacyShield.isEnabled {
             for script in PrivacyShield.userScripts() {
                 userContent.addUserScript(script)
             }

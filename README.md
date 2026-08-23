@@ -44,6 +44,15 @@ Requires macOS 14+ and the Xcode Command Line Tools (`xcode-select --install`).
 - **Ad & tracker blocking** — native WebKit content rules (the same engine as Safari
   content blockers) with a curated blocklist of ~65 ad networks, trackers, session
   recorders, and social pixels. Toggle in View → Block Ads and Trackers.
+- **Fingerprinting protection** — on by default for all windows (View →
+  Fingerprinting Protection to toggle; incognito windows are always protected).
+  Static overrides blend Rocket into the Safari crowd (GPC signal, CPU cores,
+  screen geometry, color depth, WebGL renderer, storage quota); canvas and audio
+  readouts get imperceptible Brave-style noise seeded per launch and per site, so
+  those hashes change every launch and can't identify or track you. Note: EFF's
+  coveryourtracks.eff.org may still label the fingerprint "unique" — with a
+  randomized fingerprint that uniqueness is worthless to trackers because it never
+  repeats; run the test twice across app restarts to see the hashes change.
 - **Cookie popup removal** — blocks the major consent-platform CDNs (OneTrust,
   Cookiebot, Sourcepoint, Didomi, Usercentrics, Quantcast, TrustArc, …), hides known
   banner elements, and unlocks page scrolling the banners leave behind. Toggle in

@@ -515,7 +515,7 @@ final class BookmarksBarView: NSVisualEffectView, NSMenuItemValidation {
 }
 
 /// Turns address-bar input into a URL: direct URLs load as-is, bare hosts get https://,
-/// everything else becomes a search query — Google normally, DuckDuckGo (which
+/// everything else becomes a search query — Google normally, Brave Search (which
 /// doesn't profile searches) in incognito windows.
 enum URLResolver {
     static func resolve(_ input: String, privateSearch: Bool = false) -> URL? {
@@ -535,7 +535,7 @@ enum URLResolver {
         }
 
         var components = URLComponents(string: privateSearch
-            ? "https://duckduckgo.com/" : "https://www.google.com/search")!
+            ? "https://search.brave.com/search" : "https://www.google.com/search")!
         components.queryItems = [URLQueryItem(name: "q", value: text)]
         return components.url
     }

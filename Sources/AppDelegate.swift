@@ -170,6 +170,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         ContentBlocker.shared.cookieBannersHidden.toggle()
     }
 
+    @objc func toggleFingerprintProtection(_ sender: Any?) {
+        PrivacyShield.isEnabled.toggle()
+        ContentBlocker.shared.applyToAllWebViews?()
+    }
+
     @objc func chooseWallpaper(_ sender: Any?) {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.image]
@@ -441,6 +446,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         viewMenu.addItem(withTitle: "Hide Cookie Banners",
                          action: #selector(toggleCookieBanners(_:)),
                          keyEquivalent: "")
+        viewMenu.addItem(withTitle: "Fingerprinting Protection",
+                         action: #selector(toggleFingerprintProtection(_:)),
+                         keyEquivalent: "")
         viewMenu.addItem(.separator())
         viewMenu.addItem(withTitle: "Change New Tab Wallpaper…",
                          action: #selector(chooseWallpaper(_:)),
@@ -532,6 +540,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
             return true
         case #selector(toggleCookieBanners(_:)):
             menuItem.state = ContentBlocker.shared.cookieBannersHidden ? .on : .off
+            return true
+        case #selector(toggleFingerprintProtection(_:)):
+            menuItem.state = PrivacyShield.isEnabled ? .on : .off
             return true
         case #selector(resetWallpaper(_:)):
             return NewTabPage.wallpaperURL != nil
