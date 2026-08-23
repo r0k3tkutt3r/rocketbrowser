@@ -6,7 +6,10 @@ import WebKit
 final class BrowserWindowController: NSWindowController {
 
     let webView: WKWebView
-    let isPrivate: Bool
+    /// Non-nil marks this tab as incognito; the session owns the ephemeral data store
+    /// shared by every tab spawned from the same incognito window.
+    let incognitoSession: IncognitoSession?
+    var isPrivate: Bool { incognitoSession != nil }
 
     private let urlField = URLField()
     private let progressBar = ProgressBar(frame: .zero)
@@ -38,7 +41,7 @@ final class BrowserWindowController: NSWindowController {
     }
 
     init(configuration: WKWebViewConfiguration = BrowserWindowController.makeConfiguration(),
-         isPrivate: Bool = false) {
+         incognitoSession: IncognitoSession? = nil) {
         // WebKit maps the Delete key to "go back" by default in WKWebView; Safari
         // disables that via this WebKit preference. Applied to every configuration,
         // including ones WebKit hands us for popups. Backspace still works in forms.
@@ -47,7 +50,9 @@ final class BrowserWindowController: NSWindowController {
             preferences.setValue(false, forKey: "backspaceKeyNavigationEnabled")
         }
         self.webView = WKWebView(frame: .zero, configuration: configuration)
-        self.isPrivate = isPrivate
+        self.incognitoSession = incognitoSession
+        incognitoSession?.attach()
+        let isPrivate = incognitoSession != nil
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1180, height: 780),
@@ -58,7 +63,7 @@ final class BrowserWindowController: NSWindowController {
 
         window.isReleasedWhenClosed = false
         window.titleVisibility = .hidden
-        window.title = isPrivate ? "Private" : "New Tab"
+        window.title = isPrivate ? "Incognito" : "New Tab"
         window.tabbingIdentifier = isPrivate ? "rocket.private" : "rocket.browser"
         window.toolbarStyle = .unified
         window.delegate = self
@@ -71,7 +76,7 @@ final class BrowserWindowController: NSWindowController {
         webView.allowsMagnification = true
         webView.isInspectable = true
 
-        ContentBlocker.shared.apply(to: webView)
+        ContentBlocker.shared.apply(to: webView, isIncognito: isPrivate)
 
         let content = NSView()
         bookmarksBar.translatesAutoresizingMaskIntoConstraints = false
@@ -227,7 +232,7 @@ final class BrowserWindowController: NSWindowController {
     @discardableResult
     func openInNewTab(_ url: URL?) -> BrowserWindowController {
         let configuration = webView.configuration.copy() as! WKWebViewConfiguration
-        let controller = BrowserWindowController(configuration: configuration, isPrivate: isPrivate)
+        let controller = BrowserWindowController(configuration: configuration, incognitoSession: incognitoSession)
         AppDelegate.shared.register(controller)
         attachAsTab(controller)
         if let url {
@@ -239,7 +244,13 @@ final class BrowserWindowController: NSWindowController {
     }
 
     func openNewTabPage() {
-        NewTabPage.open(in: webView)
+        if isPrivate {
+            // The normal start page is a shared on-disk file rendering suggestion
+            // chips learned from normal-browsing history — neither belongs here.
+            NewTabPage.openIncognito(in: webView)
+        } else {
+            NewTabPage.open(in: webView)
+        }
         focusAddressBar(nil)
     }
 
@@ -336,7 +347,7 @@ final class BrowserWindowController: NSWindowController {
     }
 
     @objc private func urlFieldSubmitted(_ sender: Any?) {
-        guard let url = URLResolver.resolve(urlField.stringValue) else { return }
+        guard let url = URLResolver.resolve(urlField.stringValue, privateSearch: isPrivate) else { return }
         load(url)
         window?.makeFirstResponder(webView)
     }
@@ -384,6 +395,9 @@ extension BrowserWindowController: NSWindowDelegate {
         webView.stopLoading()
         webView.navigationDelegate = nil
         webView.uiDelegate = nil
+        // Last window out destroys the session's data store — the on-disk files
+        // are deleted as soon as the web view releases them.
+        incognitoSession?.detach()
         AppDelegate.shared.unregister(self)
     }
 }
@@ -619,7 +633,7 @@ extension BrowserWindowController: WKUIDelegate {
                  for navigationAction: WKNavigationAction,
                  windowFeatures: WKWindowFeatures) -> WKWebView? {
         // target=_blank / window.open — must use the provided configuration as-is.
-        let controller = BrowserWindowController(configuration: configuration, isPrivate: isPrivate)
+        let controller = BrowserWindowController(configuration: configuration, incognitoSession: incognitoSession)
         AppDelegate.shared.register(controller)
         attachAsTab(controller)
         return controller.webView

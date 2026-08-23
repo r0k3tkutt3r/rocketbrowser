@@ -47,19 +47,27 @@ final class ContentBlocker {
     }
 
     /// Installs the enabled rule lists (and the scroll-unlock script) on a web view,
-    /// replacing whatever was installed before. Safe to call repeatedly.
-    func apply(to webView: WKWebView) {
+    /// replacing whatever was installed before. Safe to call repeatedly. Incognito
+    /// web views get both rule lists regardless of the user's toggles, plus the
+    /// PrivacyShield scripts — re-added here because this method wipes all user
+    /// scripts, so a settings toggle can never strip incognito protections.
+    func apply(to webView: WKWebView, isIncognito: Bool = false) {
         let userContent = webView.configuration.userContentController
         userContent.removeAllContentRuleLists()
         userContent.removeAllUserScripts()
-        if adsEnabled, let adsRuleList {
+        if isIncognito || adsEnabled, let adsRuleList {
             userContent.add(adsRuleList)
         }
-        if cookieBannersHidden, let cookiesRuleList {
+        if isIncognito || cookieBannersHidden, let cookiesRuleList {
             userContent.add(cookiesRuleList)
             userContent.addUserScript(WKUserScript(source: Self.scrollUnlockScript,
                                                    injectionTime: .atDocumentEnd,
                                                    forMainFrameOnly: true))
+        }
+        if isIncognito {
+            for script in PrivacyShield.userScripts() {
+                userContent.addUserScript(script)
+            }
         }
     }
 

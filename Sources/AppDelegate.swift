@@ -30,17 +30,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         NSApp.mainMenu = buildMainMenu()
         NSApp.applicationIconImage = Self.makeAppIcon()
 
+        IncognitoSession.purgeLeftoverStores()
+
         ContentBlocker.shared.applyToAllWebViews = { [weak self] in
             guard let self else { return }
             for controller in self.controllers {
-                ContentBlocker.shared.apply(to: controller.webView)
+                ContentBlocker.shared.apply(to: controller.webView, isIncognito: controller.isPrivate)
                 controller.webView.reload()
             }
         }
         ContentBlocker.shared.prepare { [weak self] in
             guard let self else { return }
             for controller in self.controllers {
-                ContentBlocker.shared.apply(to: controller.webView)
+                ContentBlocker.shared.apply(to: controller.webView, isIncognito: controller.isPrivate)
             }
         }
 
@@ -78,9 +80,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     }
 
     /// Links opened from other apps (Rocket can be chosen as the default browser).
+    /// Always routed to a normal window — a link from Mail must never land in
+    /// (or be influenced by) someone's incognito session.
     func application(_ application: NSApplication, open urls: [URL]) {
         for url in urls {
-            if let front = frontBrowserController {
+            if let front = frontNormalBrowserController {
                 front.openInNewTab(url)
             } else {
                 openNewWindow(url: url)
@@ -96,13 +100,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
             ?? controllers.last
     }
 
+    var frontNormalBrowserController: BrowserWindowController? {
+        if let front = frontBrowserController, !front.isPrivate { return front }
+        return controllers.last { !$0.isPrivate }
+    }
+
     @discardableResult
     func openNewWindow(url: URL?,
                        configuration: WKWebViewConfiguration? = nil,
-                       isPrivate: Bool = false) -> BrowserWindowController {
+                       incognitoSession: IncognitoSession? = nil) -> BrowserWindowController {
         let controller = BrowserWindowController(
             configuration: configuration ?? BrowserWindowController.makeConfiguration(),
-            isPrivate: isPrivate)
+            incognitoSession: incognitoSession)
         register(controller)
         controller.showWindow(nil)
         if let url {
@@ -127,10 +136,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         openNewWindow(url: nil)
     }
 
-    @objc func newPrivateWindow(_ sender: Any?) {
+    /// Each incognito window starts its own session: a fresh UUID-identified data
+    /// store on disk, destroyed when the session's last window closes. Tabs and
+    /// popups spawned from the window share the session (configuration copies keep
+    /// the same store); separate ⇧⌘N windows can't see each other's cookies.
+    @objc func newIncognitoWindow(_ sender: Any?) {
+        let session = IncognitoSession()
         let configuration = BrowserWindowController.makeConfiguration()
-        configuration.websiteDataStore = .nonPersistent()
-        openNewWindow(url: nil, configuration: configuration, isPrivate: true)
+        if let dataStore = session.dataStore {
+            configuration.websiteDataStore = dataStore
+        }
+        openNewWindow(url: nil, configuration: configuration, incognitoSession: session)
     }
 
     /// Cmd+T falls through to here when no browser window is open.
@@ -374,8 +390,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
                          action: #selector(NSResponder.newWindowForTab(_:)),
                          keyEquivalent: "t")
         fileMenu.addItem(withTitle: "New Window", action: #selector(newWindow(_:)), keyEquivalent: "n")
-        fileMenu.addItem(withTitle: "New Private Window",
-                         action: #selector(newPrivateWindow(_:)),
+        fileMenu.addItem(withTitle: "New Incognito Window",
+                         action: #selector(newIncognitoWindow(_:)),
                          keyEquivalent: "N")
         fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "Open Location…",

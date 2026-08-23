@@ -50,6 +50,55 @@ enum NewTabPage {
         webView.loadFileURL(pageFileURL, allowingReadAccessTo: directory)
     }
 
+    /// Incognito start page: loaded as a string (URL stays about:blank, so the
+    /// URL-field/bookmark/history gates behave), never written to disk, and free
+    /// of the suggestion chips learned from normal-browsing history.
+    static func openIncognito(in webView: WKWebView) {
+        webView.loadHTMLString(incognitoHTML, baseURL: nil)
+    }
+
+    static let incognitoHTML = """
+    <!doctype html>
+    <html>
+    <head>
+    <meta charset="utf-8">
+    <title>Incognito</title>
+    <style>
+        html, body { height: 100%; margin: 0; }
+        body {
+            background: linear-gradient(160deg, #0b0b10, #1b1b26 55%, #101018);
+            display: flex; align-items: center; justify-content: center;
+            font-family: -apple-system, sans-serif; color: #e8e8ee;
+            -webkit-user-select: none; cursor: default;
+        }
+        main { text-align: center; max-width: 30em; padding: 0 24px; }
+        .glasses { font-size: 64px; }
+        h1 { font-size: 26px; font-weight: 700; margin: 12px 0 6px; }
+        p { opacity: .7; font-size: 14px; line-height: 1.5; margin: 0 0 18px; }
+        ul { list-style: none; padding: 0; margin: 0; display: inline-block; text-align: left; }
+        li { font-size: 13px; opacity: .85; padding: 5px 0; }
+        li::before { content: "✓"; color: #7ee2a8; margin-right: 10px; }
+    </style>
+    </head>
+    <body>
+    <main>
+        <div class="glasses">🕶</div>
+        <h1>Incognito Mode</h1>
+        <p>Pages you view here leave no trace in Rocket. Cookies and site data live
+           in a private store that is permanently deleted the moment you close this
+           window, and nothing here can touch your normal browsing.</p>
+        <ul>
+            <li>Ads &amp; trackers blocked, always</li>
+            <li>Fingerprinting defenses on — screen, hardware &amp; storage hidden</li>
+            <li>Global Privacy Control tells sites not to sell your data</li>
+            <li>Searches go to DuckDuckGo</li>
+            <li>No history, no suggestions, nothing saved</li>
+        </ul>
+    </main>
+    </body>
+    </html>
+    """
+
     private static func generateHTML() -> String {
         let background: String
         if let wallpaper = wallpaperURL {
