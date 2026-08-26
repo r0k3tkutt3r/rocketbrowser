@@ -148,6 +148,19 @@ final class SuggestionEngine {
         UserDefaults.standard.stringArray(forKey: "SuggestionsExcludedHosts") ?? []
     }
 
+    /// Hosts the browser worked out are waypoints (sign-in hops, shorteners) rather
+    /// than places you visit. Recomputed from history, never persisted, never hardcoded.
+    var autoExcludedHosts: Set<String> {
+        WaypointDetector.waypointHosts(in: HistoryStore.shared.visits)
+    }
+
+    /// Auto-excluded hosts with the reason each one was flagged, for display.
+    var autoExclusionReasons: [(host: String, reason: String)] {
+        WaypointDetector.analyze(HistoryStore.shared.visits)
+            .filter(\.isWaypoint)
+            .map { ($0.host, $0.reason) }
+    }
+
     func excludeHost(_ host: String) {
         var hosts = excludedHosts
         guard !hosts.contains(host) else { return }
@@ -186,7 +199,7 @@ final class SuggestionEngine {
             return
         }
         let visits = HistoryStore.shared.visits
-        let excluded = Set(excludedHosts)
+        let excluded = Set(excludedHosts).union(WaypointDetector.waypointHosts(in: visits))
         queue.async {
             let trained = Self.trainModel(visits: visits, excluded: excluded, now: Date())
             DispatchQueue.main.async {
@@ -213,7 +226,8 @@ final class SuggestionEngine {
 
     func suggestions(count: Int = 5, at date: Date = Date()) -> [Suggestion] {
         guard isEnabled, let model else { return [] }
-        return Self.predict(model: model, at: date, excluded: Set(excludedHosts), count: count)
+        let excluded = Set(excludedHosts).union(autoExcludedHosts)
+        return Self.predict(model: model, at: date, excluded: excluded, count: count)
     }
 
     // MARK: - Pure training/inference (testable)

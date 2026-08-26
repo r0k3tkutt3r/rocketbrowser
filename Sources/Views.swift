@@ -2,9 +2,14 @@ import Cocoa
 
 /// Address bar text field that selects its contents when focused (Safari-style).
 final class URLField: NSTextField {
+    /// Called just before editing starts, so the controller can swap the simplified
+    /// display text ("google.com — hello") for the real URL.
+    var onFocus: (() -> Void)?
+
     override func becomeFirstResponder() -> Bool {
         let accepted = super.becomeFirstResponder()
         if accepted {
+            onFocus?()
             DispatchQueue.main.async { [weak self] in
                 self?.currentEditor()?.selectAll(nil)
             }

@@ -4,7 +4,11 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Rocket</string>
 	<key>CFBundleExecutable</key>
+	<string>Rocket</string>
+	<key>CFBundleIconFile</key>
 	<string>Rocket</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.kushmodi.rocket</string>
@@ -12,26 +16,10 @@
 	<string>6.0</string>
 	<key>CFBundleName</key>
 	<string>Rocket</string>
-	<key>CFBundleDisplayName</key>
-	<string>Rocket</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
 	<string>1.0</string>
-	<key>CFBundleVersion</key>
-	<string>1</string>
-	<key>LSMinimumSystemVersion</key>
-	<string>14.0</string>
-	<key>LSApplicationCategoryType</key>
-	<string>public.app-category.productivity</string>
-	<key>NSPrincipalClass</key>
-	<string>NSApplication</string>
-	<key>NSHighResolutionCapable</key>
-	<true/>
-	<key>NSSupportsAutomaticTermination</key>
-	<false/>
-	<key>NSSupportsSuddenTermination</key>
-	<false/>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -44,6 +32,12 @@
 			</array>
 		</dict>
 	</array>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.productivity</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoadsInWebContent</key>
@@ -51,9 +45,17 @@
 	</dict>
 	<key>NSCameraUsageDescription</key>
 	<string>Allows websites to use the camera when you approve it.</string>
-	<key>NSMicrophoneUsageDescription</key>
-	<string>Allows websites to use the microphone when you approve it.</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Allows websites to use your location when you approve it.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Allows websites to use the microphone when you approve it.</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSSupportsAutomaticTermination</key>
+	<false/>
+	<key>NSSupportsSuddenTermination</key>
+	<false/>
 </dict>
 </plist>

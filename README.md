@@ -19,19 +19,23 @@ Requires macOS 14+ and the Xcode Command Line Tools (`xcode-select --install`).
   ⌃Tab / ⌃⇧Tab to cycle, **⌘1–⌘9 to jump to a tab** (⌘9 clamps to the last), ⇧⌘\
   tab overview, drag to reorder, merge/split windows.
 - **New tab page** — local start page with a clock and a customizable wallpaper
-  (View → Change New Tab Wallpaper…; View → Use Default New Tab Background reverts
+  (Tools → Change New Tab Wallpaper…; Tools → Use Default New Tab Background reverts
   to the built-in gradient).
 - **Learned suggestions** — a tiny neural net (10→16→N MLP, ~1,300 parameters,
   pure Swift, zero dependencies) trains on your local visit history — day of week
   and time of day → site — and shows a few suggestion chips on the new tab page for
   the sites you usually visit around now. Retrains automatically once a day and
-  manually via View → New Tab Suggestions → Retrain Now; the same submenu can
+  manually via Tools → New Tab Suggestions → Retrain Now; the same submenu can
   disable the feature (stops recording and suggesting), exclude the current
   website, re-include excluded sites, and wipe all suggestion data. History
   (capped at 3,000 visits), model, and training all stay in
   `~/Library/Application Support/Rocket/` — nothing leaves your Mac. Private
   windows are never recorded. Suggestions appear after ~25 recorded visits across
-  3+ sites. (Deliberately not ONNX: ONNX Runtime's on-device training build would
+  3+ sites. Sign-in redirectors and link shorteners (`accounts.google.com`,
+  `login.microsoftonline.com`, `t.co`…) are excluded **automatically**, worked out
+  from how they behave — OAuth/SAML parameters, seconds-long dwell times, arriving
+  by redirect — with no hardcoded domain list; Tools → New Tab Suggestions →
+  Auto-Excluded Redirects shows what was caught and why. (Deliberately not ONNX: ONNX Runtime's on-device training build would
   add a 50 MB+ dylib and an offline Python toolchain for a 10 KB model — a plain
   Swift MLP does the same job with zero overhead.)
 - **Bookmarks bar** — under the toolbar, scrolls horizontally when full, ⌘-click a
@@ -43,8 +47,8 @@ Requires macOS 14+ and the Xcode Command Line Tools (`xcode-select --install`).
   `bookmarks.json` files migrate automatically.
 - **Ad & tracker blocking** — native WebKit content rules (the same engine as Safari
   content blockers) with a curated blocklist of ~65 ad networks, trackers, session
-  recorders, and social pixels. Toggle in View → Block Ads and Trackers.
-- **Fingerprinting protection** — on by default for all windows (View →
+  recorders, and social pixels. Toggle in Tools → Block Ads and Trackers.
+- **Fingerprinting protection** — on by default for all windows (Tools →
   Fingerprinting Protection to toggle; incognito windows are always protected).
   Static overrides blend Rocket into the Safari crowd (GPC signal, CPU cores,
   screen geometry, color depth, WebGL renderer, storage quota); canvas and audio
@@ -56,25 +60,52 @@ Requires macOS 14+ and the Xcode Command Line Tools (`xcode-select --install`).
 - **Cookie popup removal** — blocks the major consent-platform CDNs (OneTrust,
   Cookiebot, Sourcepoint, Didomi, Usercentrics, Quantcast, TrustArc, …), hides known
   banner elements, and unlocks page scrolling the banners leave behind. Toggle in
-  View → Hide Cookie Banners.
-- **Address bar** — ⌘L to focus; loads URLs directly, bare domains get `https://`,
-  `localhost:…` gets `http://`, anything else searches Google.
+  Tools → Hide Cookie Banners.
+- **Address bar** — shows the site, not the machinery: `google.com — hello` for a
+  search, `example.com` for a page. Click in (or ⌘L) and the real URL returns for
+  editing and copying. Subdomains stay visible on purpose — collapsing
+  `accounts.google.com` to `google.com` is how phishing pages hide. Typing loads
+  URLs directly, bare domains get `https://`, `localhost:…` gets `http://`, and
+  anything else searches Google (Brave Search in incognito).
+- **Search suggestions** — a dropdown of your bookmarks, your history and the search
+  engine's own completions; ↑/↓ to pick, Return to go, Esc to dismiss. Private
+  windows ask DuckDuckGo instead of Google. Toggle in Tools → Search Suggestions;
+  turning it off keeps the local bookmark/history suggestions, which never leave
+  the Mac.
+- **Downloads viewer** — toolbar button (or ⌥⌘L) opens a Safari-style list with a
+  live progress bar, transfer speed and time remaining, cancel, reveal in Finder,
+  and double-click to open. Files land in `~/Downloads` with de-duplicated names,
+  and downloads keep running after you close the tab that started them.
+- **Malware scanning (VirusTotal)** — finished downloads are checked against
+  VirusTotal, with the verdict shown inline in the downloads list. Tools → Download
+  Scanning chooses between every download, only risky-or-large files (the browser
+  classifies executables, installers, archives, macro documents, extensionless
+  files, and anything ≥25 MB), or off. **Only the file's SHA-256 is sent by
+  default** — the file itself is never uploaded unless you explicitly enable
+  "Upload Unknown Files", since VirusTotal retains and shares uploads. The API key
+  is kept in your login keychain, and can be supplied from a text file via
+  "Use API Key File…".
+- **Reopen closed tab** — ⇧⌘T walks back through the last 25 closed tabs. Incognito
+  tabs are never recorded.
 - **Back / Forward** — toolbar buttons, ⌘[ / ⌘], and two-finger swipe gestures.
 - **Bookmarks** — ⌘D to add/remove, listed in the Bookmarks menu, persisted to
   `~/Library/Application Support/Rocket/bookmarks.json`.
 - **Persistent logins** — cookies and site data use WebKit's persistent store, so you
   stay signed in between launches.
 - **Private windows** — ⇧⌘N, ephemeral data store, tabs grouped separately.
-- **Downloads** — saved to `~/Downloads` with automatic de-duplicated names.
 - **Popup handling** — `target=_blank` / `window.open` open as new tabs; ⌘-click a
   link to open it in a background… well, a new tab.
 - **Page zoom** (⌘+ / ⌘− / ⌘0), loading progress bar, stop/reload, HTTP basic auth
   prompts, file upload dialogs, JS alert/confirm/prompt, fullscreen video, camera/mic
   permission prompts, error pages.
 - **Web Inspector** — right-click → Inspect Element (always enabled).
-- **Default browser capable** — Rocket registers for `http`/`https`, so you can pick
-  it in System Settings → Desktop & Dock → Default web browser. Links from other apps
-  open as new tabs.
+- **Default browser capable** — Rocket registers for `http`/`https`. Use **Rocket →
+  Set Rocket as Default Browser** (it asks macOS directly and shows the system
+  confirmation panel); the menu item disables itself and reads "Rocket Is Your
+  Default Browser" once set. This also works when System Settings → Desktop & Dock
+  omits Rocket from its dropdown, which happens when two copies of the app share one
+  bundle id — keep a single copy (in `/Applications`) to avoid it. Links from other
+  apps open as new tabs.
 - **Safari user agent** — sites (including Google sign-in) treat it as Safari.
 - **No backspace navigation** — the Delete key never triggers "go back" (WebKit's
   default in WKWebView); it still deletes text in forms. Use ⌘[ or swipe instead.
@@ -117,16 +148,25 @@ pkill -x Rocket              # quit all instances
 ```
 Sources/
   main.swift                     entry point
-  AppDelegate.swift              menus, window registry, bookmarks menu, app icon
+  AppDelegate.swift              menus, window registry, bookmarks menu, default browser
   BrowserWindowController.swift  one tab: toolbar, web view, navigation, downloads
   BookmarkStore.swift            JSON-backed bookmark persistence
   NewTabPage.swift               generated start page + wallpaper management
   ContentBlocker.swift           WebKit content rules: ad blocking + cookie banners
   HistoryStore.swift             local visit log for suggestions (capped, debounced)
   SuggestionEngine.swift         tiny MLP: trains on (day, time) → site, predicts chips
+  WaypointDetector.swift         spots sign-in/redirect hosts from behaviour alone
+  URLDisplay.swift               simplified address-bar text + search-query extraction
+  SearchSuggestions.swift        address bar suggestions + the dropdown panel
+  DownloadManager.swift          download progress, speed, and scan orchestration
+  DownloadsPanel.swift           the downloads popover UI
+  VirusTotal.swift               hash lookup / opt-in upload, keychain-stored key
   Views.swift                    address field, progress bar, bookmarks bar, URL resolver
-Info.plist                       bundle metadata, URL scheme registration
-build.sh                         swiftc build + ad-hoc codesign
+Tools/
+  AppIcon.swift                  the app icon, drawn in code at any size
+  MakeIcon.swift                 renders the .iconset PNGs at build time
+Info.plist                       bundle metadata, URL scheme registration, icon
+build.sh                         swiftc build + icon generation + ad-hoc codesign
 ```
 
 ## Known limitations

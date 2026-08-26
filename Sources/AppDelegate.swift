@@ -17,6 +17,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     private var controllers: [BrowserWindowController] = []
     private let bookmarksMenu = NSMenu(title: "Bookmarks")
     private let suggestionsMenu = NSMenu(title: "New Tab Suggestions")
+    private let securityMenu = NSMenu(title: "Download Scanning")
+    /// Recently closed tabs, newest last — the ⇧⌘T stack.
+    private var closedTabs: [(url: URL, title: String?)] = []
 
     override init() {
         super.init()
@@ -28,9 +31,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSWindow.allowsAutomaticWindowTabbing = true
         NSApp.mainMenu = buildMainMenu()
-        NSApp.applicationIconImage = Self.makeAppIcon()
 
         IncognitoSession.purgeLeftoverStores()
+        // Picks up a key file (project folder or Application Support) into the keychain.
+        VirusTotal.importKeyFromFileIfAvailable()
 
         ContentBlocker.shared.applyToAllWebViews = { [weak self] in
             guard let self else { return }
@@ -149,9 +153,170 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         openNewWindow(url: nil, configuration: configuration, incognitoSession: session)
     }
 
+    // MARK: - Reopening closed tabs
+
+    /// Called by each window as it closes. Incognito tabs are never recorded.
+    func recordClosedTab(url: URL, title: String?) {
+        closedTabs.append((url, title))
+        if closedTabs.count > 25 { closedTabs.removeFirst() }
+    }
+
+    @objc func reopenClosedTab(_ sender: Any?) {
+        guard let last = closedTabs.popLast() else { return }
+        if let front = frontNormalBrowserController {
+            front.openInNewTab(last.url)
+        } else {
+            openNewWindow(url: last.url)
+        }
+    }
+
+    // MARK: - Downloads
+
+    @objc func showDownloadsWindow(_ sender: Any?) {
+        frontBrowserController?.showDownloads(sender)
+    }
+
+    // MARK: - Download scanning (VirusTotal)
+
+    @objc func setVirusTotalKey(_ sender: Any?) {
+        let alert = NSAlert()
+        alert.messageText = "VirusTotal API Key"
+        alert.informativeText = """
+        Paste your personal VirusTotal API key. It is stored in your login keychain, \
+        not in a preferences file. Leave the box empty to remove the stored key.
+        """
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        field.stringValue = VirusTotal.apiKey ?? ""
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        VirusTotal.apiKey = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Points Rocket at a text file containing the key; it is re-read every launch.
+    @objc func importVirusTotalKeyFile(_ sender: Any?) {
+        let panel = NSOpenPanel()
+        panel.message = "Choose a text file containing your VirusTotal API key"
+        panel.allowedContentTypes = [.plainText, .text]
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        VirusTotal.keyFilePath = url.path
+        let alert = NSAlert()
+        if VirusTotal.importKeyFromFileIfAvailable() {
+            alert.messageText = "API key imported"
+            alert.informativeText = "Rocket will re-read \(url.lastPathComponent) at every launch."
+        } else {
+            alert.messageText = "Couldn’t read a key from that file"
+            alert.informativeText = "The file must contain just the API key as plain text."
+        }
+        alert.runModal()
+    }
+
+    @objc func setScanPolicy(_ sender: NSMenuItem) {
+        switch sender.tag {
+        case 1: VirusTotal.policy = .riskyOrLarge
+        case 2: VirusTotal.policy = .everything
+        default: VirusTotal.policy = .off
+        }
+    }
+
+    @objc func toggleVirusTotalUploads(_ sender: Any?) {
+        // Turning this on means unknown files are sent to VirusTotal, where they are
+        // retained and shareable — worth an explicit confirmation, once.
+        if !VirusTotal.uploadsUnknownFiles {
+            let alert = NSAlert()
+            alert.messageText = "Upload unknown files to VirusTotal?"
+            alert.informativeText = """
+            Rocket normally sends only a file's SHA-256 hash, which reveals nothing about \
+            its contents. Uploading sends the file itself; VirusTotal keeps uploaded files \
+            and shares them with its security-vendor partners. Only enable this for files \
+            you would be comfortable making public.
+            """
+            alert.addButton(withTitle: "Enable Uploads")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        VirusTotal.uploadsUnknownFiles.toggle()
+    }
+
+    @objc func toggleSearchSuggestions(_ sender: Any?) {
+        AddressSuggestionProvider.remoteEnabled.toggle()
+    }
+
     /// Cmd+T falls through to here when no browser window is open.
     @objc func newWindowForTab(_ sender: Any?) {
         openNewWindow(url: nil)
+    }
+
+    // MARK: - Default browser
+
+    /// Compares by bundle identifier, not path: Launch Services stores the default
+    /// handler by identifier, so a second copy of Rocket elsewhere still counts.
+    var isDefaultBrowser: Bool {
+        guard let probe = URL(string: "https://example.com"),
+              let handler = NSWorkspace.shared.urlForApplication(toOpen: probe) else { return false }
+        return Bundle(url: handler)?.bundleIdentifier == Bundle.main.bundleIdentifier
+    }
+
+    /// Asks macOS directly instead of going through System Settings — this works even
+    /// when the Settings dropdown misses Rocket (duplicate/stale Launch Services
+    /// records for one bundle id are enough to confuse that list). macOS shows its own
+    /// confirmation panel; setting https also settles http, so the second call
+    /// normally completes without a further prompt.
+    @objc func setAsDefaultBrowser(_ sender: Any?) {
+        let appURL = Bundle.main.bundleURL
+
+        // Running from build/ is a trap: build.sh deletes that bundle on every build,
+        // which strands the default-browser setting on a path that no longer exists.
+        if !appURL.path.hasPrefix("/Applications/") {
+            let alert = NSAlert()
+            alert.messageText = "Set this copy as the default browser?"
+            alert.informativeText = """
+            This copy of Rocket is running from:
+            \(appURL.path)
+
+            Rebuilding deletes and recreates that bundle, which can break the default \
+            browser setting. Installing Rocket in /Applications and setting that copy \
+            is more reliable.
+            """
+            alert.addButton(withTitle: "Set Anyway")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+
+        let workspace = NSWorkspace.shared
+        workspace.setDefaultApplication(at: appURL, toOpenURLsWithScheme: "https") { [weak self] error in
+            DispatchQueue.main.async {
+                if let error {
+                    self?.presentDefaultBrowserFailure(error)
+                    return
+                }
+                workspace.setDefaultApplication(at: appURL, toOpenURLsWithScheme: "http") { error in
+                    DispatchQueue.main.async {
+                        if let error {
+                            self?.presentDefaultBrowserFailure(error)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func presentDefaultBrowserFailure(_ error: Error) {
+        let alert = NSAlert()
+        alert.messageText = "Couldn’t set Rocket as the default browser"
+        alert.informativeText = """
+        \(error.localizedDescription)
+
+        Stale Launch Services records are the usual cause — several registrations of \
+        one app confuse the default-browser machinery. Re-registering this copy \
+        usually clears it:
+
+        lsregister -f -u <old path>
+        """
+        alert.runModal()
     }
 
     @objc func toggleBookmarksBar(_ sender: Any?) {
@@ -273,7 +438,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
             rebuildBookmarksMenu()
         } else if menu === suggestionsMenu {
             rebuildSuggestionsMenu()
+        } else if menu === securityMenu {
+            rebuildSecurityMenu()
         }
+    }
+
+    private func rebuildSecurityMenu() {
+        securityMenu.removeAllItems()
+        let keyItem = securityMenu.addItem(withTitle: VirusTotal.hasAPIKey
+                                            ? "Change VirusTotal API Key…" : "Set VirusTotal API Key…",
+                                           action: #selector(setVirusTotalKey(_:)), keyEquivalent: "")
+        keyItem.target = self
+        let importItem = securityMenu.addItem(withTitle: "Use API Key File…",
+                                              action: #selector(importVirusTotalKeyFile(_:)), keyEquivalent: "")
+        importItem.target = self
+        if let path = VirusTotal.keyFilePath, !path.isEmpty {
+            let note = securityMenu.addItem(
+                withTitle: "    reading \((path as NSString).lastPathComponent)",
+                action: nil, keyEquivalent: "")
+            note.isEnabled = false
+        }
+        securityMenu.addItem(.separator())
+
+        for (title, tag) in [("Don't Scan Downloads", 0),
+                             ("Scan Risky or Large Files", 1),
+                             ("Scan Every Download", 2)] {
+            let item = securityMenu.addItem(withTitle: title,
+                                            action: #selector(setScanPolicy(_:)), keyEquivalent: "")
+            item.tag = tag
+            item.target = self
+        }
+        securityMenu.addItem(.separator())
+        let uploadItem = securityMenu.addItem(withTitle: "Upload Unknown Files for Analysis",
+                                              action: #selector(toggleVirusTotalUploads(_:)), keyEquivalent: "")
+        uploadItem.target = self
+        let note = securityMenu.addItem(
+            withTitle: "Without uploads, only a file's hash is sent.", action: nil, keyEquivalent: "")
+        note.isEnabled = false
     }
 
     private func rebuildSuggestionsMenu() {
@@ -300,6 +501,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         let excludedParent = suggestionsMenu.addItem(withTitle: "Excluded Websites",
                                                      action: nil, keyEquivalent: "")
         suggestionsMenu.setSubmenu(excludedMenu, for: excludedParent)
+
+        // Hosts the browser worked out are sign-in hops or redirectors on its own.
+        let autoMenu = NSMenu(title: "Detected Redirects")
+        let detected = SuggestionEngine.shared.autoExclusionReasons
+        if detected.isEmpty {
+            autoMenu.addItem(withTitle: "None detected yet", action: nil, keyEquivalent: "").isEnabled = false
+        } else {
+            for entry in detected {
+                let item = autoMenu.addItem(withTitle: entry.host, action: nil, keyEquivalent: "")
+                item.toolTip = entry.reason
+                item.isEnabled = false
+                let detail = autoMenu.addItem(withTitle: "    \(entry.reason)", action: nil, keyEquivalent: "")
+                detail.isEnabled = false
+            }
+        }
+        let autoParent = suggestionsMenu.addItem(withTitle: "Auto-Excluded Redirects",
+                                                 action: nil, keyEquivalent: "")
+        suggestionsMenu.setSubmenu(autoMenu, for: autoParent)
 
         suggestionsMenu.addItem(.separator())
         suggestionsMenu.addItem(withTitle: "Reset Suggestions Data…",
@@ -379,6 +598,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
                         action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
                         keyEquivalent: "")
         appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Set Rocket as Default Browser",
+                        action: #selector(setAsDefaultBrowser(_:)),
+                        keyEquivalent: "")
+        appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Hide Rocket", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         let hideOthers = appMenu.addItem(withTitle: "Hide Others",
                                          action: #selector(NSApplication.hideOtherApplications(_:)),
@@ -440,28 +663,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
                          action: #selector(toggleBookmarksBar(_:)),
                          keyEquivalent: "B")
         viewMenu.addItem(.separator())
-        viewMenu.addItem(withTitle: "Block Ads and Trackers",
-                         action: #selector(toggleAdBlocking(_:)),
-                         keyEquivalent: "")
-        viewMenu.addItem(withTitle: "Hide Cookie Banners",
-                         action: #selector(toggleCookieBanners(_:)),
-                         keyEquivalent: "")
-        viewMenu.addItem(withTitle: "Fingerprinting Protection",
-                         action: #selector(toggleFingerprintProtection(_:)),
-                         keyEquivalent: "")
-        viewMenu.addItem(.separator())
-        viewMenu.addItem(withTitle: "Change New Tab Wallpaper…",
-                         action: #selector(chooseWallpaper(_:)),
-                         keyEquivalent: "")
-        viewMenu.addItem(withTitle: "Use Default New Tab Background",
-                         action: #selector(resetWallpaper(_:)),
-                         keyEquivalent: "")
-        let suggestionsParent = viewMenu.addItem(withTitle: "New Tab Suggestions",
-                                                 action: nil, keyEquivalent: "")
-        suggestionsMenu.delegate = self
-        viewMenu.setSubmenu(suggestionsMenu, for: suggestionsParent)
-        rebuildSuggestionsMenu()
-        viewMenu.addItem(.separator())
         let fullScreen = viewMenu.addItem(withTitle: "Enter Full Screen",
                                           action: #selector(NSWindow.toggleFullScreen(_:)),
                                           keyEquivalent: "f")
@@ -474,6 +675,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         historyMenu.addItem(withTitle: "Forward",
                             action: #selector(BrowserWindowController.navigateForward(_:)),
                             keyEquivalent: "]")
+        let reopen = historyMenu.addItem(withTitle: "Reopen Last Closed Tab",
+                                         action: #selector(reopenClosedTab(_:)),
+                                         keyEquivalent: "T")
+        reopen.keyEquivalentModifierMask = [.command, .shift]
         historyMenu.addItem(.separator())
         historyMenu.addItem(withTitle: "Home",
                             action: #selector(BrowserWindowController.goHome(_:)),
@@ -484,6 +689,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         bookmarksMenu.delegate = self
         main.addItem(bookmarksItem)
         rebuildBookmarksMenu()
+
+        // Tools: everything that changes how Rocket behaves, as opposed to the View
+        // menu's commands for the page currently on screen.
+        let toolsMenu = addSubmenu("Tools", to: main)
+        toolsMenu.addItem(withTitle: "Block Ads and Trackers",
+                          action: #selector(toggleAdBlocking(_:)),
+                          keyEquivalent: "")
+        toolsMenu.addItem(withTitle: "Hide Cookie Banners",
+                          action: #selector(toggleCookieBanners(_:)),
+                          keyEquivalent: "")
+        toolsMenu.addItem(withTitle: "Fingerprinting Protection",
+                          action: #selector(toggleFingerprintProtection(_:)),
+                          keyEquivalent: "")
+        toolsMenu.addItem(withTitle: "Search Suggestions",
+                          action: #selector(toggleSearchSuggestions(_:)),
+                          keyEquivalent: "")
+        toolsMenu.addItem(.separator())
+        let downloadsItem = toolsMenu.addItem(withTitle: "Show Downloads",
+                                              action: #selector(showDownloadsWindow(_:)),
+                                              keyEquivalent: "l")
+        downloadsItem.keyEquivalentModifierMask = [.command, .option]
+        let securityParent = toolsMenu.addItem(withTitle: "Download Scanning", action: nil, keyEquivalent: "")
+        securityMenu.delegate = self
+        toolsMenu.setSubmenu(securityMenu, for: securityParent)
+        rebuildSecurityMenu()
+        toolsMenu.addItem(.separator())
+        let suggestionsParent = toolsMenu.addItem(withTitle: "New Tab Suggestions",
+                                                  action: nil, keyEquivalent: "")
+        suggestionsMenu.delegate = self
+        toolsMenu.setSubmenu(suggestionsMenu, for: suggestionsParent)
+        rebuildSuggestionsMenu()
+        toolsMenu.addItem(withTitle: "Change New Tab Wallpaper…",
+                          action: #selector(chooseWallpaper(_:)),
+                          keyEquivalent: "")
+        toolsMenu.addItem(withTitle: "Use Default New Tab Background",
+                          action: #selector(resetWallpaper(_:)),
+                          keyEquivalent: "")
 
         let windowMenu = addSubmenu("Window", to: main)
         windowMenu.addItem(withTitle: "Minimize",
@@ -531,6 +773,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
+        case #selector(setAsDefaultBrowser(_:)):
+            if isDefaultBrowser {
+                menuItem.title = "Rocket Is Your Default Browser"
+                return false
+            }
+            menuItem.title = "Set Rocket as Default Browser"
+            return true
         case #selector(toggleBookmarksBar(_:)):
             let shown = UserDefaults.standard.object(forKey: "ShowBookmarksBar") as? Bool ?? true
             menuItem.title = shown ? "Hide Bookmarks Bar" : "Show Bookmarks Bar"
@@ -546,6 +795,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
             return true
         case #selector(resetWallpaper(_:)):
             return NewTabPage.wallpaperURL != nil
+        case #selector(reopenClosedTab(_:)):
+            return !closedTabs.isEmpty
+        case #selector(toggleSearchSuggestions(_:)):
+            menuItem.state = AddressSuggestionProvider.remoteEnabled ? .on : .off
+            return true
+        case #selector(setScanPolicy(_:)):
+            let policies: [Int: ScanPolicy] = [0: .off, 1: .riskyOrLarge, 2: .everything]
+            menuItem.state = policies[menuItem.tag] == VirusTotal.policy ? .on : .off
+            return true
+        case #selector(toggleVirusTotalUploads(_:)):
+            menuItem.state = VirusTotal.uploadsUnknownFiles ? .on : .off
+            return VirusTotal.hasAPIKey
+        case #selector(showDownloadsWindow(_:)):
+            return frontBrowserController != nil
         case #selector(toggleSuggestions(_:)):
             menuItem.state = SuggestionEngine.shared.isEnabled ? .on : .off
             return true
@@ -559,20 +822,4 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         }
     }
 
-    // MARK: - App icon
-
-    private static func makeAppIcon() -> NSImage {
-        NSImage(size: NSSize(width: 512, height: 512), flipped: false) { rect in
-            let inset = rect.insetBy(dx: 44, dy: 44)
-            let path = NSBezierPath(roundedRect: inset, xRadius: 116, yRadius: 116)
-            NSGradient(colors: [
-                NSColor(calibratedRed: 0.28, green: 0.16, blue: 0.65, alpha: 1),
-                NSColor(calibratedRed: 0.63, green: 0.27, blue: 0.90, alpha: 1),
-            ])?.draw(in: path, angle: 90)
-            let emoji = NSAttributedString(string: "🚀", attributes: [.font: NSFont.systemFont(ofSize: 264)])
-            let size = emoji.size()
-            emoji.draw(at: NSPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2))
-            return true
-        }
-    }
 }

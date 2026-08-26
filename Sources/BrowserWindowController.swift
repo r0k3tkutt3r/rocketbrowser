@@ -22,12 +22,28 @@ final class BrowserWindowController: NSWindowController {
     private var downloads = Set<WKDownload>()
     private var suppressHistoryOnce = false
 
+    private let suggestionsDropdown = SuggestionsDropdown()
+    private var remoteSuggestionTask: URLSessionDataTask?
+    private var suggestionDebounce: DispatchWorkItem?
+    private var downloadsToolbarItem: NSToolbarItem?
+    private weak var downloadsButton: NSButton?
+    private let downloadsPopover = NSPopover()
+    private var downloadsObserver: NSObjectProtocol?
+    /// Open history visit for the page on screen, closed when the tab navigates away.
+    private var currentVisitID: UUID?
+    /// Set when the pending navigation was NOT started by the user (a redirect).
+    private var pendingNavigationViaRedirect = false
+    private var nextNavigationIsUserInitiated = false
+    /// What the user actually typed, kept while arrow keys preview suggestions.
+    private var typedTextBeforeSelection: String?
+
     private enum ItemID {
         static let back = NSToolbarItem.Identifier("rocket.back")
         static let forward = NSToolbarItem.Identifier("rocket.forward")
         static let urlField = NSToolbarItem.Identifier("rocket.urlField")
         static let reload = NSToolbarItem.Identifier("rocket.reload")
         static let bookmark = NSToolbarItem.Identifier("rocket.bookmark")
+        static let downloads = NSToolbarItem.Identifier("rocket.downloads")
     }
 
     static func makeConfiguration() -> WKWebViewConfiguration {
@@ -150,6 +166,103 @@ final class BrowserWindowController: NSWindowController {
         urlField.delegate = self
         urlField.target = self
         urlField.action = #selector(urlFieldSubmitted(_:))
+
+        // Editing always works against the real URL, never the shortened display form.
+        urlField.onFocus = { [weak self] in
+            guard let self, let url = self.webView.url, !NewTabPage.isNewTabURL(url) else { return }
+            self.urlField.stringValue = url.absoluteString
+        }
+        suggestionsDropdown.onAccept = { [weak self] suggestion in
+            guard let self else { return }
+            self.urlField.stringValue = suggestion.url.absoluteString
+            self.load(suggestion.url)
+            self.window?.makeFirstResponder(self.webView)
+        }
+
+        downloadsPopover.behavior = .transient
+        downloadsPopover.contentViewController = DownloadsViewController()
+        downloadsObserver = NotificationCenter.default.addObserver(
+            forName: .downloadsDidChange, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.updateDownloadsItem()
+        }
+    }
+
+    // MARK: - Downloads
+
+    @objc func showDownloads(_ sender: Any?) {
+        // Fall back to the window's content view if the toolbar item is off-screen
+        // (overflow menu, very narrow window) so the list is always reachable.
+        let anchor: NSView? = downloadsButton ?? window?.contentView
+        guard let anchor else { return }
+        if downloadsPopover.isShown {
+            downloadsPopover.performClose(nil)
+            return
+        }
+        let rect = anchor === downloadsButton
+            ? anchor.bounds
+            : NSRect(x: anchor.bounds.maxX - 40, y: anchor.bounds.maxY - 1, width: 32, height: 1)
+        downloadsPopover.show(relativeTo: rect, of: anchor, preferredEdge: .maxY)
+    }
+
+    /// Pops the list open the first time a download starts, the way Safari does.
+    private func showDownloadsPopoverIfHidden() {
+        guard !downloadsPopover.isShown, window?.isKeyWindow == true else { return }
+        showDownloads(nil)
+    }
+
+    private func updateDownloadsItem() {
+        let active = DownloadsManager.shared.hasActiveDownloads
+        downloadsButton?.image = NSImage(
+            systemSymbolName: active ? "arrow.down.circle.fill" : "arrow.down.circle",
+            accessibilityDescription: "Downloads")
+    }
+
+    // MARK: - Address bar suggestions
+
+    private func refreshSuggestions() {
+        suggestionDebounce?.cancel()
+        remoteSuggestionTask?.cancel()
+
+        let text = urlField.stringValue
+        guard !text.trimmingCharacters(in: .whitespaces).isEmpty else {
+            suggestionsDropdown.hide()
+            return
+        }
+
+        var results = AddressSuggestionProvider.local(for: text)
+        // The literal typed text always leads, so Return does what it looks like.
+        if let direct = URLResolver.resolve(text, privateSearch: isPrivate) {
+            let isSearch = URLDisplay.searchQuery(from: direct) != nil
+            results.insert(AddressSuggestion(kind: isSearch ? .search : .history,
+                                             title: text,
+                                             subtitle: isSearch ? "Search" : "Open",
+                                             url: direct), at: 0)
+        }
+        suggestionsDropdown.show(results, below: urlField)
+
+        // Remote completions land a beat later and are appended without disturbing
+        // whatever the user has already selected with the arrow keys.
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.remoteSuggestionTask = AddressSuggestionProvider.remote(
+                for: text, privateSearch: self.isPrivate
+            ) { [weak self] completions in
+                guard let self, self.urlField.stringValue == text else { return }
+                var merged = results
+                for completion in completions.prefix(5) {
+                    guard !merged.contains(where: { $0.title.caseInsensitiveCompare(completion) == .orderedSame }),
+                          let url = URLResolver.resolve(completion, privateSearch: self.isPrivate) else { continue }
+                    merged.append(AddressSuggestion(kind: .search, title: completion,
+                                                    subtitle: nil, url: url))
+                }
+                if self.window?.firstResponder === self.urlField.currentEditor() {
+                    self.suggestionsDropdown.show(merged, below: self.urlField)
+                }
+            }
+        }
+        suggestionDebounce = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
     }
 
     private func configureToolbar() {
@@ -200,9 +313,10 @@ final class BrowserWindowController: NSWindowController {
         if !force, let editor = urlField.currentEditor(), window?.firstResponder === editor {
             return
         }
-        let urlString = webView.url?.absoluteString ?? ""
-        let isInternal = urlString == "about:blank" || NewTabPage.isNewTabURL(webView.url)
-        urlField.stringValue = isInternal ? "" : urlString
+        // Unfocused, the field shows the simplified form ("google.com — hello").
+        // Focusing it swaps in the real URL so editing and copying are unaffected.
+        urlField.stringValue = NewTabPage.isNewTabURL(webView.url)
+            ? "" : URLDisplay.displayString(for: webView.url)
     }
 
     func updateBookmarksBarVisibility() {
@@ -229,6 +343,9 @@ final class BrowserWindowController: NSWindowController {
     // MARK: - Loading
 
     func load(_ url: URL) {
+        // Marks this navigation as deliberate, so the history recorder does not
+        // mistake a typed URL or a bookmark for a redirect hop.
+        nextNavigationIsUserInitiated = true
         webView.load(URLRequest(url: url))
     }
 
@@ -303,14 +420,27 @@ final class BrowserWindowController: NSWindowController {
 
     @objc func pageZoomIn(_ sender: Any?) {
         webView.pageZoom = min(webView.pageZoom + 0.1, 3.0)
+        resetMagnification()
     }
 
     @objc func pageZoomOut(_ sender: Any?) {
         webView.pageZoom = max(webView.pageZoom - 0.1, 0.5)
+        resetMagnification()
     }
 
     @objc func pageZoomActual(_ sender: Any?) {
         webView.pageZoom = 1.0
+        resetMagnification()
+    }
+
+    /// `magnification` (trackpad pinch) is a separate property from `pageZoom`, and a
+    /// stray pinch otherwise sticks forever: the whole rendered surface stays larger
+    /// than the viewport, so the page pans in both directions and even position:fixed
+    /// chrome like a sidebar drifts. Keyboard zoom is authoritative, so it clears it.
+    private func resetMagnification() {
+        if webView.magnification != 1.0 {
+            webView.setMagnification(1.0, centeredAt: .zero)
+        }
     }
 
     override func newWindowForTab(_ sender: Any?) {
@@ -390,6 +520,16 @@ final class BrowserWindowController: NSWindowController {
 
 extension BrowserWindowController: NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
+        // Stamp the dwell time for the page on screen, then offer the tab to ⇧⌘T.
+        closeCurrentVisit()
+        suggestionsDropdown.hide()
+        if !isPrivate, let url = webView.url, !NewTabPage.isNewTabURL(url) {
+            AppDelegate.shared.recordClosedTab(url: url, title: webView.title)
+        }
+        if let downloadsObserver {
+            NotificationCenter.default.removeObserver(downloadsObserver)
+            self.downloadsObserver = nil
+        }
         observations.removeAll()
         if let bookmarkObserver {
             NotificationCenter.default.removeObserver(bookmarkObserver)
@@ -411,7 +551,7 @@ extension BrowserWindowController: NSToolbarDelegate {
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         [ItemID.back, ItemID.forward, .flexibleSpace,
-         ItemID.urlField, .flexibleSpace, ItemID.reload, ItemID.bookmark]
+         ItemID.urlField, .flexibleSpace, ItemID.reload, ItemID.bookmark, ItemID.downloads]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -441,6 +581,21 @@ extension BrowserWindowController: NSToolbarDelegate {
             let item = makeButton(itemIdentifier, symbol: "star", label: "Bookmark",
                                   action: #selector(toggleBookmark(_:)))
             bookmarkToolbarItem = item
+            return item
+        case ItemID.downloads:
+            // A custom view (not a plain image item) so the popover always has a
+            // concrete anchor to attach to.
+            let button = NSButton(image: NSImage(systemSymbolName: "arrow.down.circle",
+                                                 accessibilityDescription: "Downloads")!,
+                                  target: self, action: #selector(showDownloads(_:)))
+            button.bezelStyle = .texturedRounded
+            button.setButtonType(.momentaryPushIn)
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.view = button
+            item.label = "Downloads"
+            item.toolTip = "Downloads"
+            downloadsButton = button
+            downloadsToolbarItem = item
             return item
         case ItemID.urlField:
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
@@ -509,14 +664,72 @@ extension BrowserWindowController: NSMenuItemValidation {
 // MARK: - URL field delegate
 
 extension BrowserWindowController: NSTextFieldDelegate {
+
+    func controlTextDidChange(_ notification: Notification) {
+        guard notification.object as? NSTextField === urlField else { return }
+        typedTextBeforeSelection = nil
+        refreshSuggestions()
+    }
+
+    func controlTextDidEndEditing(_ notification: Notification) {
+        guard notification.object as? NSTextField === urlField else { return }
+        suggestionsDropdown.hide()
+        typedTextBeforeSelection = nil
+        // Deferred deliberately. AppKit order is doCommandBy → this → the field's
+        // action, so resetting the text here synchronously blanked the very string a
+        // submission was about to read, and Return silently did nothing.
+        DispatchQueue.main.async { [weak self] in
+            self?.syncURLField(force: true)
+        }
+    }
+
+    /// Arrow keys preview the highlighted suggestion in the field, and stepping off
+    /// the list puts the user's own text back rather than stranding a suggestion.
+    private func previewSelection(moving delta: Int, in textView: NSTextView) {
+        if typedTextBeforeSelection == nil { typedTextBeforeSelection = textView.string }
+        if let suggestion = suggestionsDropdown.moveSelection(by: delta) {
+            urlField.stringValue = suggestion.title
+        } else {
+            urlField.stringValue = typedTextBeforeSelection ?? ""
+        }
+    }
+
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         guard control === urlField else { return false }
-        if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+
+        switch commandSelector {
+        case #selector(NSResponder.cancelOperation(_:)):
+            suggestionsDropdown.hide()
             syncURLField(force: true)
             window?.makeFirstResponder(webView)
             return true
+
+        case #selector(NSResponder.moveDown(_:)) where suggestionsDropdown.isVisible:
+            previewSelection(moving: 1, in: textView)
+            return true
+
+        case #selector(NSResponder.moveUp(_:)) where suggestionsDropdown.isVisible:
+            previewSelection(moving: -1, in: textView)
+            return true
+
+        case #selector(NSResponder.insertNewline(_:)):
+            // Read the typed text HERE. This runs before the field ends editing, so it
+            // is the last point at which the field still holds what the user typed.
+            let typed = textView.string
+            let selected = suggestionsDropdown.selectedSuggestion
+            suggestionsDropdown.hide()
+            typedTextBeforeSelection = nil
+            // Handling it fully (returning true) also stops the default action from
+            // firing, so the outcome no longer depends on AppKit's callback order.
+            if let target = selected?.url ?? URLResolver.resolve(typed, privateSearch: isPrivate) {
+                load(target)
+                window?.makeFirstResponder(webView)
+            }
+            return true
+
+        default:
+            return false
         }
-        return false
     }
 }
 
@@ -543,6 +756,13 @@ extension BrowserWindowController: WKNavigationDelegate {
             decisionHandler(.download)
             return
         }
+        if navigationAction.targetFrame?.isMainFrame ?? false {
+            // .other covers scripted and meta-refresh navigation; anything the user
+            // actually triggered arrives as a link, a form, a reload or back/forward.
+            pendingNavigationViaRedirect = !nextNavigationIsUserInitiated
+                && navigationAction.navigationType == .other
+            nextNavigationIsUserInitiated = false
+        }
         if navigationAction.navigationType == .linkActivated,
            navigationAction.modifierFlags.contains(.command) {
             openInNewTab(url)
@@ -559,16 +779,20 @@ extension BrowserWindowController: WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
-        download.delegate = self
-        downloads.insert(download)
+        DownloadsManager.shared.begin(download,
+            suggestedName: navigationAction.request.url?.lastPathComponent ?? "Download")
+        showDownloadsPopoverIfHidden()
     }
 
     func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) {
-        download.delegate = self
-        downloads.insert(download)
+        DownloadsManager.shared.begin(download,
+            suggestedName: navigationResponse.response.suggestedFilename ?? "Download")
+        showDownloadsPopoverIfHidden()
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        let viaRedirect = pendingNavigationViaRedirect
+        pendingNavigationViaRedirect = false
         if suppressHistoryOnce {
             suppressHistoryOnce = false
             return
@@ -576,7 +800,26 @@ extension BrowserWindowController: WKNavigationDelegate {
         guard !isPrivate, SuggestionEngine.shared.isEnabled,
               let url = webView.url,
               let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme) else { return }
-        HistoryStore.shared.record(url: url)
+        currentVisitID = HistoryStore.shared.record(url: url, viaRedirect: viaRedirect)
+    }
+
+    /// A server 3xx always means this page was a hop, never a destination the user chose.
+    func webView(_ webView: WKWebView,
+                 didReceiveServerRedirectForProvisionalNavigation navigation: WKNavigation!) {
+        pendingNavigationViaRedirect = true
+    }
+
+    /// Closes the previous visit the moment the tab starts going somewhere else — the
+    /// dwell time this produces is what separates waypoints from real destinations.
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        closeCurrentVisit()
+    }
+
+    func closeCurrentVisit() {
+        if let currentVisitID {
+            HistoryStore.shared.closeVisit(id: currentVisitID)
+            self.currentVisitID = nil
+        }
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
