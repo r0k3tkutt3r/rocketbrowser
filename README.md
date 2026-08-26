@@ -11,6 +11,18 @@ seconds with `swiftc`.
 open build/Rocket.app
 ```
 
+To install it into `/Applications`:
+
+```bash
+./build.sh --install
+```
+
+Use that rather than `cp -R build/Rocket.app /Applications/`. Copying over an existing
+bundle merges into it in place, which leaves macOS holding a stale code signature for
+that path — the app then dies on launch with "Code Signature Invalid" even though
+`codesign --verify` reports it as valid. `--install` removes, re-copies and re-signs.
+If you hit it anyway, `codesign --force --sign - /Applications/Rocket.app` recovers.
+
 Requires macOS 14+ and the Xcode Command Line Tools (`xcode-select --install`).
 
 ## Features

@@ -38,4 +38,25 @@ codesign --force --sign - "$APP"
 touch "$APP"
 
 echo "Built $APP"
-echo "Run with: open $APP"
+
+# ./build.sh --install  replaces /Applications/Rocket.app safely.
+#
+# Do NOT use `cp -R build/Rocket.app /Applications/` when a copy is already there:
+# cp merges the new files over the old bundle in place, and macOS keeps the previous
+# code signature cached for that path. The result passes `codesign --verify` on disk
+# but the kernel kills it on launch with SIGKILL "Code Signature Invalid".
+if [[ "${1:-}" == "--install" ]]; then
+    DEST="/Applications/$APP_NAME.app"
+    if pgrep -x "$APP_NAME" >/dev/null; then
+        echo "note: $APP_NAME is running — quit it and relaunch to pick up this build"
+    fi
+    rm -rf "$DEST"                      # replace wholesale, never merge in place
+    ditto "$APP" "$DEST"
+    codesign --force --sign - "$DEST"   # fresh signature, so no stale cache
+    touch "$DEST"
+    echo "Installed $DEST"
+    echo "Run with: open $DEST"
+else
+    echo "Run with: open $APP"
+    echo "Install with: ./build.sh --install"
+fi
