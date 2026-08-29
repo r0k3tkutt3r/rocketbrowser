@@ -27,6 +27,17 @@ enum NewTabPage {
         return url.standardizedFileURL.path == pageFileURL.standardizedFileURL.path
     }
 
+    /// True for anything Rocket shows in place of a real site: the on-disk start
+    /// page, and the incognito start page, which is loaded as a string and so sits
+    /// at about:blank. There is no real URL behind these, which is why the address
+    /// bar must stay empty even while it is focused for editing.
+    static func isInternalURL(_ url: URL?) -> Bool {
+        guard let url else { return true }
+        let raw = url.absoluteString
+        if raw.isEmpty || raw == "about:blank" { return true }
+        return isNewTabURL(url)
+    }
+
     static func setWallpaper(from source: URL) throws {
         removeWallpaperFiles()
         let ext = source.pathExtension.isEmpty ? "img" : source.pathExtension

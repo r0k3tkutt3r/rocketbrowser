@@ -210,7 +210,7 @@ final class BrowserWindowController: NSWindowController {
 
         // Editing always works against the real URL, never the shortened display form.
         urlField.onFocus = { [weak self] in
-            guard let self, let url = self.webView.url, !NewTabPage.isNewTabURL(url) else { return }
+            guard let self, let url = self.webView.url, !NewTabPage.isInternalURL(url) else { return }
             self.urlField.stringValue = url.absoluteString
         }
         suggestionsDropdown.onAccept = { [weak self] suggestion in
@@ -356,7 +356,7 @@ final class BrowserWindowController: NSWindowController {
         }
         // Unfocused, the field shows the simplified form ("google.com — hello").
         // Focusing it swaps in the real URL so editing and copying are unaffected.
-        urlField.stringValue = NewTabPage.isNewTabURL(webView.url)
+        urlField.stringValue = NewTabPage.isInternalURL(webView.url)
             ? "" : URLDisplay.displayString(for: webView.url)
     }
 
