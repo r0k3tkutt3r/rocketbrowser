@@ -29,6 +29,14 @@ final class DownloadItem {
     let startedAt = Date()
     weak var download: WKDownload?
 
+    /// Set once this download has been handed off from WebKit to Rocket's own parallel
+    /// range downloader; `download` is finished doing any work at that point.
+    var chunked: ChunkedDownload?
+
+    /// Stops the deliberate WKDownload cancellation that performs the handoff from being
+    /// reported to the user as a failed download.
+    var handedOff = false
+
     var filename: String
     var destination: URL?
     var totalBytes: Int64 = 0
@@ -122,7 +130,11 @@ final class DownloadsManager: NSObject, WKDownloadDelegate {
     }
 
     func cancel(_ item: DownloadItem) {
-        item.download?.cancel { _ in }
+        if let chunked = item.chunked {
+            chunked.cancel()
+        } else {
+            item.download?.cancel { _ in }
+        }
         item.state = .cancelled
         notify()
     }
@@ -158,9 +170,17 @@ final class DownloadsManager: NSObject, WKDownloadDelegate {
     private func sample() {
         var changed = false
         for item in items where item.state == .running {
-            guard let progress = item.download?.progress else { continue }
-            let received = progress.completedUnitCount
-            let total = progress.totalUnitCount
+            let received: Int64
+            let total: Int64
+            if let chunked = item.chunked {
+                received = chunked.receivedBytes
+                total = chunked.totalBytes
+            } else if let progress = item.download?.progress {
+                received = progress.completedUnitCount
+                total = progress.totalUnitCount
+            } else {
+                continue
+            }
             if total > 0 { item.totalBytes = total }
 
             let now = Date()
@@ -247,7 +267,88 @@ final class DownloadsManager: NSObject, WKDownloadDelegate {
         item?.risk = DownloadRiskAssessor.assess(filename: suggestedFilename,
                                                  byteCount: response.expectedContentLength)
         notify()
-        completionHandler(destination)
+
+        guard let item, ChunkedDownload.isEnabled,
+              ChunkedDownload.isEligible(response: response),
+              let url = response.url else {
+            completionHandler(destination)
+            return
+        }
+        // The WKDownload sits idle until the probe answers. Only a confirmed 206 is worth
+        // trading a working download for; anything else falls straight through to WebKit
+        // as though this feature were switched off.
+        headers(for: download, url: url) { headers in
+            ChunkedDownload.probe(url: url, headers: headers) { total in
+                DispatchQueue.main.async {
+                    guard let total, total >= ChunkedDownload.minimumSize else {
+                        completionHandler(destination)
+                        return
+                    }
+                    item.handedOff = true
+                    completionHandler(nil)
+                    self.startChunked(item: item, url: url, destination: destination,
+                                      totalBytes: total, headers: headers)
+                }
+            }
+        }
+    }
+
+    /// Rebuilds the request context WKDownload was providing for free: the session's
+    /// cookies, the Safari user agent, and the referring page.
+    private func headers(for download: WKDownload, url: URL,
+                         completion: @escaping ([String: String]) -> Void) {
+        var headers: [String: String] = [:]
+        let request = download.originalRequest
+        headers["User-Agent"] = request?.value(forHTTPHeaderField: "User-Agent")
+            ?? ChunkedDownload.fallbackUserAgent
+        if let referer = request?.value(forHTTPHeaderField: "Referer") {
+            headers["Referer"] = referer
+        }
+        if let accept = request?.value(forHTTPHeaderField: "Accept") {
+            headers["Accept"] = accept
+        }
+        // The cookie jar belongs to the web view's data store, which for an incognito
+        // window is that window's own self-destructing store.
+        guard let store = download.webView?.configuration.websiteDataStore.httpCookieStore else {
+            completion(headers)
+            return
+        }
+        store.getAllCookies { cookies in
+            if let cookie = ChunkedDownload.cookieHeader(for: url, from: cookies) {
+                headers["Cookie"] = cookie
+            }
+            completion(headers)
+        }
+    }
+
+    private func startChunked(item: DownloadItem, url: URL, destination: URL,
+                              totalBytes: Int64, headers: [String: String]) {
+        let chunked = ChunkedDownload(url: url, destination: destination,
+                                      totalBytes: totalBytes, headers: headers)
+        item.chunked = chunked
+        item.totalBytes = totalBytes
+        item.download = nil
+        startPolling()
+        notify()
+        // `item` weakly: it owns `chunked`, and `chunked` owns this closure. The cycle
+        // does break on every terminal outcome, but not for a download that hangs.
+        chunked.start { [weak self, weak item] outcome in
+            guard let self, let item else { return }
+            switch outcome {
+            case .finished:
+                item.state = .finished
+                item.receivedBytes = totalBytes
+                item.bytesPerSecond = 0
+                self.notify()
+                self.scanIfNeeded(item)
+            case .failed(let message):
+                item.state = .failed(message)
+                self.notify()
+            case .cancelled:
+                item.state = .cancelled
+                self.notify()
+            }
+        }
     }
 
     func downloadDidFinish(_ download: WKDownload) {
@@ -262,12 +363,14 @@ final class DownloadsManager: NSObject, WKDownloadDelegate {
 
     func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
         guard let item = itemsByDownload[ObjectIdentifier(download)] else { return }
+        itemsByDownload.removeValue(forKey: ObjectIdentifier(download))
+        // The handoff cancels this WKDownload on purpose; the chunked downloader has it.
+        if item.handedOff { return }
         if (error as NSError).code == NSURLErrorCancelled {
             item.state = .cancelled
         } else {
             item.state = .failed(error.localizedDescription)
         }
-        itemsByDownload.removeValue(forKey: ObjectIdentifier(download))
         notify()
     }
 }

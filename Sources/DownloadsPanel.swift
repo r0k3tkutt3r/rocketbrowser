@@ -1,7 +1,47 @@
 import Cocoa
 
-/// One row in the downloads popover: name, progress bar, "4.2 MB of 18 MB — 2.3 MB/s",
-/// and the VirusTotal verdict when there is one.
+/// A progress bar that can be split into several independently-filling segments: one per
+/// connection for a chunked download, or a single segment for the aggregate total.
+final class SegmentedProgressView: NSView {
+
+    var fractions: [Double] = [] {
+        didSet {
+            guard fractions != oldValue else { return }
+            needsDisplay = true
+        }
+    }
+
+    private let gap: CGFloat = 3
+
+    override var isFlipped: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard !fractions.isEmpty, bounds.width > 0 else { return }
+        let count = CGFloat(fractions.count)
+        let width = (bounds.width - gap * (count - 1)) / count
+        guard width > 0 else { return }
+        let radius = bounds.height / 2
+
+        for (index, fraction) in fractions.enumerated() {
+            let x = (width + gap) * CGFloat(index)
+            NSColor.quaternaryLabelColor.setFill()
+            NSBezierPath(roundedRect: NSRect(x: x, y: 0, width: width, height: bounds.height),
+                         xRadius: radius, yRadius: radius).fill()
+
+            let filled = width * CGFloat(min(max(fraction, 0), 1))
+            guard filled > 0 else { continue }
+            NSColor.controlAccentColor.setFill()
+            // Cap the corner radius at half the fill, or a barely-started segment draws as
+            // a lozenge wider than the progress it represents.
+            NSBezierPath(roundedRect: NSRect(x: x, y: 0, width: filled, height: bounds.height),
+                         xRadius: min(radius, filled / 2), yRadius: radius).fill()
+        }
+    }
+}
+
+/// One row in the downloads popover: name, progress, "4.2 MB of 18 MB — 2.3 MB/s", and the
+/// VirusTotal verdict when there is one. A chunked download shows its four connections as a
+/// split bar with the aggregate total underneath; everything else keeps the single bar.
 final class DownloadRowView: NSView {
 
     private let icon = NSImageView()
@@ -9,6 +49,9 @@ final class DownloadRowView: NSView {
     private let statusLabel = NSTextField(labelWithString: "")
     private let scanLabel = NSTextField(labelWithString: "")
     private let progress = NSProgressIndicator()
+    private let chunkBars = SegmentedProgressView()
+    private let totalBar = SegmentedProgressView()
+    private let barsStack = NSStackView()
     private let actionButton = NSButton()
     private var item: DownloadItem?
 
@@ -35,7 +78,16 @@ final class DownloadRowView: NSView {
         actionButton.target = self
         actionButton.action = #selector(actionTapped)
 
-        for view in [icon, nameLabel, statusLabel, scanLabel, progress, actionButton] as [NSView] {
+        // A stack so the split bar can collapse out of layout entirely for the ordinary
+        // single-connection case, rather than leaving a gap behind a hidden view.
+        barsStack.orientation = .vertical
+        barsStack.spacing = 3
+        barsStack.alignment = .leading
+        barsStack.addArrangedSubview(chunkBars)
+        barsStack.addArrangedSubview(totalBar)
+        barsStack.addArrangedSubview(progress)
+
+        for view in [icon, nameLabel, statusLabel, scanLabel, barsStack, actionButton] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
@@ -49,12 +101,20 @@ final class DownloadRowView: NSView {
             nameLabel.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 9),
             nameLabel.trailingAnchor.constraint(equalTo: actionButton.leadingAnchor, constant: -8),
 
-            progress.topAnchor.constraint(equalTo: nameLabel.bottomAnchor, constant: 4),
-            progress.leadingAnchor.constraint(equalTo: nameLabel.leadingAnchor),
-            progress.trailingAnchor.constraint(equalTo: nameLabel.trailingAnchor),
+            barsStack.topAnchor.constraint(equalTo: nameLabel.bottomAnchor, constant: 4),
+            barsStack.leadingAnchor.constraint(equalTo: nameLabel.leadingAnchor),
+            barsStack.trailingAnchor.constraint(equalTo: nameLabel.trailingAnchor),
+
+            // The per-connection bars sit thinner than the aggregate below them, so the
+            // total reads as the headline and the four chunks as the detail.
+            chunkBars.widthAnchor.constraint(equalTo: barsStack.widthAnchor),
+            chunkBars.heightAnchor.constraint(equalToConstant: 3),
+            totalBar.widthAnchor.constraint(equalTo: barsStack.widthAnchor),
+            totalBar.heightAnchor.constraint(equalToConstant: 5),
+            progress.widthAnchor.constraint(equalTo: barsStack.widthAnchor),
             progress.heightAnchor.constraint(equalToConstant: 4),
 
-            statusLabel.topAnchor.constraint(equalTo: progress.bottomAnchor, constant: 3),
+            statusLabel.topAnchor.constraint(equalTo: barsStack.bottomAnchor, constant: 3),
             statusLabel.leadingAnchor.constraint(equalTo: nameLabel.leadingAnchor),
             statusLabel.trailingAnchor.constraint(equalTo: nameLabel.trailingAnchor),
 
@@ -82,8 +142,17 @@ final class DownloadRowView: NSView {
         }
 
         let running = item.state == .running
-        progress.isHidden = !running
-        if running {
+        let fractions = running ? (item.chunked?.chunkFractions ?? []) : []
+        let isSplit = fractions.count > 1
+
+        chunkBars.isHidden = !isSplit
+        totalBar.isHidden = !isSplit
+        progress.isHidden = running ? isSplit : true
+
+        if isSplit {
+            chunkBars.fractions = fractions
+            totalBar.fractions = [item.fractionCompleted]
+        } else if running {
             if item.totalBytes > 0 {
                 progress.isIndeterminate = false
                 progress.doubleValue = item.fractionCompleted
@@ -218,9 +287,12 @@ final class DownloadsViewController: NSViewController {
         }
     }
 
-    /// Rows are taller when a scan verdict has to fit underneath the status line.
+    /// Rows are taller when a scan verdict has to fit underneath the status line, and
+    /// taller again when a chunked download needs the split bar as well as the total.
     private func height(for item: DownloadItem) -> CGFloat {
-        item.scanLine == nil ? 56 : 68
+        var height: CGFloat = item.scanLine == nil ? 56 : 68
+        if item.state == .running, (item.chunked?.chunkFractions.count ?? 0) > 1 { height += 7 }
+        return height
     }
 
     private func reload() {

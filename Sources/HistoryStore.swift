@@ -13,19 +13,28 @@ struct Visit: Codable {
     var dwell: TimeInterval?
     /// The page was reached by a redirect rather than a click, a typed URL or a bookmark.
     var viaRedirect: Bool
+    /// Seconds this tab was actually the front-most window with Rocket active, capped
+    /// per visit. This is the engagement signal: a tab left open in the background all
+    /// night contributes nothing, and one very long session cannot dominate the model.
+    var activeTime: TimeInterval?
+
+    /// A single visit contributes at most this much attention.
+    static let activeTimeCap: TimeInterval = 15 * 60
 
     init(id: UUID = UUID(), url: String, host: String, ts: Date,
-         dwell: TimeInterval? = nil, viaRedirect: Bool = false) {
+         dwell: TimeInterval? = nil, viaRedirect: Bool = false,
+         activeTime: TimeInterval? = nil) {
         self.id = id
         self.url = url
         self.host = host
         self.ts = ts
         self.dwell = dwell
         self.viaRedirect = viaRedirect
+        self.activeTime = activeTime
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, url, host, ts, dwell, viaRedirect
+        case id, url, host, ts, dwell, viaRedirect, activeTime
     }
 
     /// History files written before dwell tracking decode with the new fields absent.
@@ -37,7 +46,18 @@ struct Visit: Codable {
         ts = try container.decode(Date.self, forKey: .ts)
         dwell = try container.decodeIfPresent(TimeInterval.self, forKey: .dwell)
         viaRedirect = try container.decodeIfPresent(Bool.self, forKey: .viaRedirect) ?? false
+        activeTime = try container.decodeIfPresent(TimeInterval.self, forKey: .activeTime)
     }
+
+    /// Attention actually paid to this page. Visits recorded before active-time
+    /// tracking fall back to wall-clock dwell so old history still trains something.
+    var engagementSeconds: TimeInterval {
+        min(activeTime ?? dwell ?? 0, Visit.activeTimeCap)
+    }
+
+    /// False for history recorded before attention tracking existed. Unmeasured is not
+    /// the same as brief, and scoring it as a bounce would quietly discard old history.
+    var hasEngagementData: Bool { activeTime != nil || dwell != nil }
 }
 
 /// Local-only visit log used to train new-tab suggestions. Never leaves disk;
@@ -79,10 +99,13 @@ final class HistoryStore {
         return visit.id
     }
 
-    /// Stamps how long the page was actually on screen.
-    func closeVisit(id: UUID, at date: Date = Date()) {
+    /// Stamps how long the page was on screen, and how much of that was real attention.
+    func closeVisit(id: UUID, at date: Date = Date(), activeTime: TimeInterval? = nil) {
         guard let index = visits.lastIndex(where: { $0.id == id }), visits[index].dwell == nil else { return }
         visits[index].dwell = max(0, date.timeIntervalSince(visits[index].ts))
+        if let activeTime {
+            visits[index].activeTime = min(max(0, activeTime), Visit.activeTimeCap)
+        }
         scheduleSave()
     }
 

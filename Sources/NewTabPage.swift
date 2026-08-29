@@ -114,6 +114,17 @@ enum NewTabPage {
             }.joined()
             suggestionsHTML = "<div class=\"chips\">\(chips)</div>"
         }
+        // The retrain control sits under the chips and talks back to Swift through the
+        // "rocket" script message handler that BrowserWindowController installs.
+        var retrainHTML = ""
+        if SuggestionEngine.shared.isEnabled {
+            let caption = suggestions.isEmpty ? "Train suggestions" : "Retrain suggestions"
+            retrainHTML = """
+            <div class="retrain-row">
+              <button class="retrain" id="retrain" onclick="retrain()">\(caption)</button>
+            </div>
+            """
+        }
         return """
         <!doctype html>
         <html>
@@ -132,6 +143,14 @@ enum NewTabPage {
             .time { font-size: 96px; font-weight: 700; letter-spacing: -2px; font-variant-numeric: tabular-nums; }
             .date { font-size: 20px; font-weight: 500; opacity: .85; margin-top: 2px; }
             .chips { margin-top: 30px; display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+            .retrain-row { margin-top: 16px; }
+            .retrain { padding: 6px 14px; border-radius: 999px; border: 1px solid rgba(255,255,255,.28);
+                       background: rgba(255,255,255,.10); color: rgba(255,255,255,.92);
+                       font-size: 12px; font-family: inherit; cursor: pointer;
+                       backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+                       text-shadow: none; transition: background .15s; }
+            .retrain:hover:not(:disabled) { background: rgba(255,255,255,.22); }
+            .retrain:disabled { opacity: .55; cursor: default; }
             .chip { padding: 8px 16px; border-radius: 999px; background: rgba(255,255,255,.16);
                     color: #fff; text-decoration: none; font-size: 14px; font-weight: 500;
                     cursor: pointer; backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
@@ -140,7 +159,7 @@ enum NewTabPage {
         </style>
         </head>
         <body>
-        <div class="clock"><div class="time" id="time"></div><div class="date" id="date"></div>\(suggestionsHTML)</div>
+        <div class="clock"><div class="time" id="time"></div><div class="date" id="date"></div>\(suggestionsHTML)\(retrainHTML)</div>
         <script>
             function tick() {
                 const now = new Date();
@@ -151,6 +170,14 @@ enum NewTabPage {
             }
             tick();
             setInterval(tick, 10000);
+            function retrain() {
+                const button = document.getElementById('retrain');
+                button.disabled = true;
+                button.textContent = 'Retraining…';
+                // Swift reloads this page when training finishes, so there is no
+                // success state to render here.
+                window.webkit.messageHandlers.rocket.postMessage({ action: 'retrain' });
+            }
         </script>
         </body>
         </html>

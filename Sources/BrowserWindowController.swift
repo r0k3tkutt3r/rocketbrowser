@@ -36,6 +36,11 @@ final class BrowserWindowController: NSWindowController {
     private var nextNavigationIsUserInitiated = false
     /// What the user actually typed, kept while arrow keys preview suggestions.
     private var typedTextBeforeSelection: String?
+    /// Attention accounting for the page on screen: seconds accumulated while this tab
+    /// was front-most and Rocket was the active app, plus the open interval's start.
+    private var activeAccumulated: TimeInterval = 0
+    private var activeSince: Date?
+    private var focusObservers: [NSObjectProtocol] = []
 
     private enum ItemID {
         static let back = NSToolbarItem.Identifier("rocket.back")
@@ -145,9 +150,45 @@ final class BrowserWindowController: NSWindowController {
             self?.updateBookmarkItem()
         }
 
+        // The new tab page's retrain button posts here. Remove first: popups share the
+        // opener's userContentController, and adding a duplicate name throws.
+        let userContent = webView.configuration.userContentController
+        userContent.removeScriptMessageHandler(forName: "rocket")
+        userContent.add(self, name: "rocket")
+
+        // Attention is only counted while Rocket itself is frontmost.
+        let center = NotificationCenter.default
+        focusObservers = [
+            center.addObserver(forName: NSApplication.didBecomeActiveNotification,
+                               object: nil, queue: .main) { [weak self] _ in
+                self?.resumeActiveTiming()
+            },
+            center.addObserver(forName: NSApplication.willResignActiveNotification,
+                               object: nil, queue: .main) { [weak self] _ in
+                self?.pauseActiveTiming()
+            },
+        ]
+
         configureURLField()
         configureToolbar()
         startObservations()
+    }
+
+    // MARK: - Attention timing
+
+    private var isFrontmostTab: Bool {
+        NSApp.isActive && (window?.isKeyWindow ?? false)
+    }
+
+    private func resumeActiveTiming() {
+        guard activeSince == nil, isFrontmostTab else { return }
+        activeSince = Date()
+    }
+
+    private func pauseActiveTiming() {
+        guard let since = activeSince else { return }
+        activeAccumulated += Date().timeIntervalSince(since)
+        activeSince = nil
     }
 
     required init?(coder: NSCoder) {
@@ -519,9 +560,22 @@ final class BrowserWindowController: NSWindowController {
 // MARK: - NSWindowDelegate
 
 extension BrowserWindowController: NSWindowDelegate {
+    func windowDidBecomeKey(_ notification: Notification) {
+        resumeActiveTiming()
+    }
+
+    func windowDidResignKey(_ notification: Notification) {
+        pauseActiveTiming()
+    }
+
     func windowWillClose(_ notification: Notification) {
         // Stamp the dwell time for the page on screen, then offer the tab to ⇧⌘T.
+        pauseActiveTiming()
         closeCurrentVisit()
+        // Breaks the retain cycle: the content controller holds its message handlers.
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "rocket")
+        for observer in focusObservers { NotificationCenter.default.removeObserver(observer) }
+        focusObservers.removeAll()
         suggestionsDropdown.hide()
         if !isPrivate, let url = webView.url, !NewTabPage.isNewTabURL(url) {
             AppDelegate.shared.recordClosedTab(url: url, title: webView.title)
@@ -816,10 +870,14 @@ extension BrowserWindowController: WKNavigationDelegate {
     }
 
     func closeCurrentVisit() {
+        pauseActiveTiming()
         if let currentVisitID {
-            HistoryStore.shared.closeVisit(id: currentVisitID)
+            HistoryStore.shared.closeVisit(id: currentVisitID, activeTime: activeAccumulated)
             self.currentVisitID = nil
         }
+        activeAccumulated = 0
+        // The tab is still in front, so attention on the next page starts immediately.
+        resumeActiveTiming()
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
@@ -958,6 +1016,27 @@ extension BrowserWindowController: WKUIDelegate {
                  type: WKMediaCaptureType,
                  decisionHandler: @escaping (WKPermissionDecision) -> Void) {
         decisionHandler(.prompt)
+    }
+}
+
+// MARK: - New tab page messages
+
+extension BrowserWindowController: WKScriptMessageHandler {
+    func userContentController(_ userContentController: WKUserContentController,
+                               didReceive message: WKScriptMessage) {
+        guard message.name == "rocket",
+              let body = message.body as? [String: Any],
+              let action = body["action"] as? String else { return }
+        switch action {
+        case "retrain":
+            SuggestionEngine.shared.retrain { [weak self] _ in
+                // Regenerating the page is what shows the new chips.
+                guard let self, NewTabPage.isNewTabURL(self.webView.url) else { return }
+                NewTabPage.open(in: self.webView)
+            }
+        default:
+            break
+        }
     }
 }
 

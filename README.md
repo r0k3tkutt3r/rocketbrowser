@@ -33,9 +33,8 @@ Requires macOS 14+ and the Xcode Command Line Tools (`xcode-select --install`).
 - **New tab page** — local start page with a clock and a customizable wallpaper
   (Tools → Change New Tab Wallpaper…; Tools → Use Default New Tab Background reverts
   to the built-in gradient).
-- **Learned suggestions** — a tiny neural net (10→16→N MLP, ~1,300 parameters,
-  pure Swift, zero dependencies) trains on your local visit history — day of week
-  and time of day → site — and shows a few suggestion chips on the new tab page for
+- **Learned suggestions** — a tiny neural net ((11+N)→16→N MLP, a couple of thousand
+  parameters, pure Swift, zero dependencies) trains on your local visit history and shows a few suggestion chips on the new tab page for
   the sites you usually visit around now. Retrains automatically once a day and
   manually via Tools → New Tab Suggestions → Retrain Now; the same submenu can
   disable the feature (stops recording and suggesting), exclude the current
@@ -43,7 +42,15 @@ Requires macOS 14+ and the Xcode Command Line Tools (`xcode-select --install`).
   (capped at 3,000 visits), model, and training all stay in
   `~/Library/Application Support/Rocket/` — nothing leaves your Mac. Private
   windows are never recorded. Suggestions appear after ~25 recorded visits across
-  3+ sites. Sign-in redirectors and link shorteners (`accounts.google.com`,
+  3+ sites, and there's a **Retrain** button right under the chips when you want it
+  refreshed immediately. Beyond day and time, the model learns from how long you
+  actually spent on a site (counted only while that tab was front-most and Rocket was
+  the active app, capped at 15 minutes per visit, so a tab left open overnight isn't
+  mistaken for a favourite), which site you came from (so it learns that mail is
+  usually followed by calendar), whether you're starting a fresh session or mid-flow,
+  and how overdue a site is against its own visit rhythm — a daily read you haven't
+  opened today outranks one you just closed, and the site you're coming from is never
+  suggested back to you. Sign-in redirectors and link shorteners (`accounts.google.com`,
   `login.microsoftonline.com`, `t.co`…) are excluded **automatically**, worked out
   from how they behave — OAuth/SAML parameters, seconds-long dwell times, arriving
   by redirect — with no hardcoded domain list; Tools → New Tab Suggestions →

@@ -177,6 +177,14 @@ final class SuggestionEngine {
 
     // MARK: - Lifecycle
 
+    /// A model saved before the feature set changed still loads and still predicts —
+    /// the extra inputs are simply ignored by its narrower first layer — but it cannot
+    /// use them, so it is retrained at the first opportunity rather than left stale.
+    var modelMatchesCurrentFeatures: Bool {
+        guard let model else { return false }
+        return model.mlp.inputSize == 11 + model.vocab.count
+    }
+
     /// Retrains at most once per day — but keeps trying on every call until the
     /// first model exists, so suggestions appear as soon as there's enough history
     /// rather than after the next day boundary. Called at launch and on activation.
@@ -186,7 +194,8 @@ final class SuggestionEngine {
             return
         }
         let last = UserDefaults.standard.object(forKey: "SuggestionsLastTrained") as? Date
-        if model == nil || last == nil || !Calendar.current.isDateInToday(last!) {
+        if model == nil || !modelMatchesCurrentFeatures
+            || last == nil || !Calendar.current.isDateInToday(last!) {
             retrain(completion: completion)
         } else {
             completion?(false)
@@ -227,53 +236,100 @@ final class SuggestionEngine {
     func suggestions(count: Int = 5, at date: Date = Date()) -> [Suggestion] {
         guard isEnabled, let model else { return [] }
         let excluded = Set(excludedHosts).union(autoExcludedHosts)
-        return Self.predict(model: model, at: date, excluded: excluded, count: count)
+        let context = Self.context(from: HistoryStore.shared.visits, at: date)
+        return Self.predict(model: model, at: date, excluded: excluded,
+                            count: count, context: context)
     }
 
     // MARK: - Pure training/inference (testable)
 
-    /// Day-of-week one-hot (7) + cyclical time of day (2) + weekend flag (1).
-    static func features(for date: Date) -> [Double] {
+    /// A visit starts a new browsing session when this much time passed since the last
+    /// one — the gap that separates "sat down at the Mac" from "still browsing".
+    static let sessionGap: TimeInterval = 30 * 60
+    /// Attention past this point counts as full engagement.
+    private static let fullEngagementSeconds: TimeInterval = 120
+
+    /// Everything the model needs about "right now" that is not the clock.
+    struct PredictionContext {
+        var previousHost: String?
+        var isSessionStart: Bool
+        /// Per-host multiplier: >1 when a site is overdue, <1 when you just left it.
+        var dueness: [String: Double] = [:]
+    }
+
+    /// Input layout: day-of-week one-hot (7) + cyclical time of day (2) + weekend (1)
+    /// + session-start (1) + previous-host one-hot (vocab). The previous-host block is
+    /// what lets the net learn transitions — that mail is usually followed by calendar.
+    static func features(for date: Date, sessionStart: Bool,
+                         previousHostIndex: Int?, vocabSize: Int) -> [Double] {
         let calendar = Calendar.current
         let weekday = calendar.component(.weekday, from: date) - 1  // 0 = Sunday
-        var features = [Double](repeating: 0, count: 10)
+        var features = [Double](repeating: 0, count: 11 + vocabSize)
         features[weekday] = 1
         let hour = Double(calendar.component(.hour, from: date))
             + Double(calendar.component(.minute, from: date)) / 60
         features[7] = sin(2 * .pi * hour / 24)
         features[8] = cos(2 * .pi * hour / 24)
         features[9] = (weekday == 0 || weekday == 6) ? 1 : 0
+        features[10] = sessionStart ? 1 : 0
+        if let previousHostIndex, previousHostIndex < vocabSize {
+            features[11 + previousHostIndex] = 1
+        }
         return features
+    }
+
+    /// How much a visit counts for. A two-second bounce still says something, but a
+    /// page you actually read says a great deal more. Visits from before attention
+    /// tracking existed score neutrally rather than as bounces — "not measured" must
+    /// not be read as "not engaged", or upgrading the browser would throw away the
+    /// history the model was already built on.
+    static func engagementWeight(_ visit: Visit) -> Double {
+        guard visit.hasEngagementData else { return 0.7 }
+        return 0.25 + 0.75 * min(1, visit.engagementSeconds / fullEngagementSeconds)
     }
 
     static func trainModel(visits: [Visit], excluded: Set<String>, now: Date) -> TrainedModel? {
         let usable = visits.filter { !excluded.contains($0.host) }
         guard usable.count >= 25 else { return nil }
 
-        // Vocabulary: most-visited hosts, recency-weighted, one-off sites dropped.
+        // Vocabulary: recency-weighted AND engagement-weighted, so sites you linger on
+        // outrank sites you merely pass through often.
         var weightedCounts: [String: Double] = [:]
         for visit in usable {
             let ageDays = now.timeIntervalSince(visit.ts) / 86400
-            weightedCounts[visit.host, default: 0] += pow(0.5, ageDays / 14)
+            weightedCounts[visit.host, default: 0] += pow(0.5, ageDays / 14) * engagementWeight(visit)
         }
         let vocab = weightedCounts
-            .filter { $0.value >= 1.5 }
+            .filter { $0.value >= 1.0 }
             .sorted { $0.value > $1.value }
             .prefix(24)
             .map(\.key)
         guard vocab.count >= 3 else { return nil }
         let indexOf = Dictionary(uniqueKeysWithValues: vocab.enumerated().map { ($1, $0) })
 
+        // Chronological order is what makes "previous host" and "session start" mean
+        // anything, so sort before walking the list.
+        let ordered = usable.sorted { $0.ts < $1.ts }
         var inputs: [[Double]] = []
         var labels: [Int] = []
         var sampleWeights: [Double] = []
-        for visit in usable {
+
+        for (position, visit) in ordered.enumerated() {
             guard let label = indexOf[visit.host] else { continue }
-            inputs.append(features(for: visit.ts))
+            let previous = position > 0 ? ordered[position - 1] : nil
+            let gap = previous.map { visit.ts.timeIntervalSince($0.ts) } ?? .greatestFiniteMagnitude
+            let sessionStart = gap >= sessionGap
+            // Only a same-session predecessor is context; across a session boundary the
+            // previous page tells you nothing about this one.
+            let previousIndex = sessionStart ? nil : previous.flatMap { indexOf[$0.host] }
+
+            inputs.append(features(for: visit.ts, sessionStart: sessionStart,
+                                   previousHostIndex: previousIndex, vocabSize: vocab.count))
             labels.append(label)
             let ageDays = now.timeIntervalSince(visit.ts) / 86400
-            sampleWeights.append(pow(0.5, ageDays / 14))
+            sampleWeights.append(pow(0.5, ageDays / 14) * engagementWeight(visit))
         }
+        guard inputs.count >= 20 else { return nil }
 
         let mlp = TinyMLP.trained(inputs: inputs, labels: labels, sampleWeights: sampleWeights,
                                   hidden: 16, classes: vocab.count)
@@ -287,14 +343,59 @@ final class SuggestionEngine {
         return TrainedModel(vocab: Array(vocab), openURLs: openURLs, mlp: mlp, trainedAt: now)
     }
 
-    static func predict(model: TrainedModel, at date: Date,
-                        excluded: Set<String>, count: Int) -> [Suggestion] {
-        let probs = model.mlp.forward(features(for: date))
+    /// Builds "right now" from live history: what you were last on, whether this is a
+    /// fresh session, and which sites are overdue relative to their own rhythm.
+    static func context(from visits: [Visit], at date: Date) -> PredictionContext {
+        let ordered = visits.sorted { $0.ts < $1.ts }
+        guard let last = ordered.last else {
+            return PredictionContext(previousHost: nil, isSessionStart: true)
+        }
+        let sessionStart = date.timeIntervalSince(last.ts) >= sessionGap
+
+        // Typical gap between visits to each host, so "overdue" is judged against that
+        // site's own rhythm — hourly for a dashboard, daily for a news site.
+        var timestamps: [String: [Date]] = [:]
+        for visit in ordered { timestamps[visit.host, default: []].append(visit.ts) }
+
+        var dueness: [String: Double] = [:]
+        for (host, stamps) in timestamps {
+            guard let lastVisit = stamps.last else { continue }
+            let sinceLast = date.timeIntervalSince(lastVisit)
+            guard stamps.count >= 3 else {
+                dueness[host] = 1
+                continue
+            }
+            let gaps = zip(stamps.dropFirst(), stamps).map { $0.timeIntervalSince($1) }
+                .filter { $0 > 60 }.sorted()
+            guard !gaps.isEmpty else {
+                dueness[host] = 1
+                continue
+            }
+            let typical = gaps[gaps.count / 2]
+            // Just left it → damp it down; long overdue → lift it up.
+            dueness[host] = min(1.6, max(0.3, sinceLast / typical))
+        }
+        return PredictionContext(previousHost: sessionStart ? nil : last.host,
+                                 isSessionStart: sessionStart,
+                                 dueness: dueness)
+    }
+
+    static func predict(model: TrainedModel, at date: Date, excluded: Set<String>,
+                        count: Int, context: PredictionContext = PredictionContext(
+                            previousHost: nil, isSessionStart: true)) -> [Suggestion] {
+        let previousIndex = context.previousHost.flatMap { model.vocab.firstIndex(of: $0) }
+        let probs = model.mlp.forward(features(for: date, sessionStart: context.isSessionStart,
+                                               previousHostIndex: previousIndex,
+                                               vocabSize: model.vocab.count))
         let floor = 0.5 / Double(model.vocab.count)
         return zip(model.vocab, probs)
             .filter { !excluded.contains($0.0) && $0.1 > floor }
-            .sorted { $0.1 > $1.1 }
+            // Never suggest the page you are already coming from.
+            .filter { $0.0 != context.previousHost }
+            .map { (host: $0.0, score: $0.1 * (context.dueness[$0.0] ?? 1)) }
+            .sorted { $0.score > $1.score }
             .prefix(count)
-            .map { Suggestion(host: $0.0, url: model.openURLs[$0.0] ?? "https://\($0.0)", score: $0.1) }
+            .map { Suggestion(host: $0.host, url: model.openURLs[$0.host] ?? "https://\($0.host)",
+                              score: $0.score) }
     }
 }

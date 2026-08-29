@@ -245,6 +245,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         AddressSuggestionProvider.remoteEnabled.toggle()
     }
 
+    @objc func toggleChunkedDownloads(_ sender: Any?) {
+        ChunkedDownload.isEnabled.toggle()
+    }
+
     /// Cmd+T falls through to here when no browser window is open.
     @objc func newWindowForTab(_ sender: Any?) {
         openNewWindow(url: nil)
@@ -714,6 +718,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         securityMenu.delegate = self
         toolsMenu.setSubmenu(securityMenu, for: securityParent)
         rebuildSecurityMenu()
+        toolsMenu.addItem(withTitle: "Accelerate Large Downloads",
+                          action: #selector(toggleChunkedDownloads(_:)),
+                          keyEquivalent: "")
         toolsMenu.addItem(.separator())
         let suggestionsParent = toolsMenu.addItem(withTitle: "New Tab Suggestions",
                                                   action: nil, keyEquivalent: "")
@@ -799,6 +806,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
             return !closedTabs.isEmpty
         case #selector(toggleSearchSuggestions(_:)):
             menuItem.state = AddressSuggestionProvider.remoteEnabled ? .on : .off
+            return true
+        case #selector(toggleChunkedDownloads(_:)):
+            menuItem.state = ChunkedDownload.isEnabled ? .on : .off
             return true
         case #selector(setScanPolicy(_:)):
             let policies: [Int: ScanPolicy] = [0: .off, 1: .riskyOrLarge, 2: .everything]
