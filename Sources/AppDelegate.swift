@@ -20,6 +20,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     private let securityMenu = NSMenu(title: "Download Scanning")
     /// Recently closed tabs, newest last — the ⇧⌘T stack.
     private var closedTabs: [(url: URL, title: String?)] = []
+    /// The session as it was at launch, read once and kept.
+    ///
+    /// It cannot be re-read from disk on demand: the live session overwrites
+    /// session.json within seconds of launch, so by the time anyone reaches
+    /// "Reopen Last Session" the file describes the empty tab they are looking at.
+    /// Holding the launch-time copy in memory keeps the command working all run.
+    private var previousSession: SavedSession?
 
     override init() {
         super.init()
@@ -53,7 +60,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         SuggestionEngine.shared.retrainIfDue { [weak self] trained in
             if trained { self?.reloadNewTabPages() }
         }
-        openNewWindow(url: nil)
+        previousSession = SessionStore.shared.load()
+        // ⇧⌘T picks up where the last run left off, not from an empty stack.
+        closedTabs = (previousSession?.closedTabs ?? []).compactMap { tab in
+            URL(string: tab.url).map { (url: $0, title: tab.title) }
+        }
+
+        if SessionStore.restoresOnLaunch, let session = previousSession, !session.isEmpty {
+            restore(session)
+        } else {
+            openNewWindow(url: nil)
+        }
+
         // Don't steal focus when launched hidden (e.g. `open -gj` for background testing).
         if !NSApp.isHidden {
             NSApp.activate()
@@ -68,6 +86,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
 
     func applicationWillTerminate(_ notification: Notification) {
         HistoryStore.shared.flush()
+        SessionStore.shared.flush { currentSessionSnapshot() }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -138,6 +157,85 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
 
     func unregister(_ controller: BrowserWindowController) {
         controllers.removeAll { $0 === controller }
+    }
+
+    // MARK: - Session
+
+    /// Walks the live windows in the order they are shown — tab groups in the order
+    /// their first tab was registered, tabs in tab-bar order — and reduces them to the
+    /// plain values `SessionSnapshot` filters. Incognito windows and blank start pages
+    /// are dropped there, not here.
+    func currentSessionSnapshot() -> SavedSession {
+        var entries: [SessionSnapshot.Entry] = []
+        var emitted = Set<ObjectIdentifier>()
+        var nextGroupKey = 0
+
+        for controller in controllers {
+            guard let window = controller.window,
+                  !emitted.contains(ObjectIdentifier(controller)) else { continue }
+            let groupKey = nextGroupKey
+            nextGroupKey += 1
+
+            // tabGroup.windows is the tab bar's own order; a lone window has no group.
+            for tabWindow in window.tabGroup?.windows ?? [window] {
+                guard let tabController = tabWindow.windowController as? BrowserWindowController,
+                      controllers.contains(where: { $0 === tabController }),
+                      emitted.insert(ObjectIdentifier(tabController)).inserted else { continue }
+                entries.append(SessionSnapshot.Entry(
+                    url: tabController.webView.url?.absoluteString ?? "",
+                    title: tabController.webView.title,
+                    groupKey: groupKey,
+                    isPrivate: tabController.isPrivate,
+                    isNewTabPage: NewTabPage.isNewTabURL(tabController.webView.url)))
+            }
+        }
+
+        let closed = closedTabs.map { SessionTab(url: $0.url.absoluteString, title: $0.title) }
+        return SessionSnapshot.build(from: entries, closedTabs: closed)
+    }
+
+    /// Called as tabs navigate and close. The write itself is debounced inside the
+    /// store, and the snapshot is taken when the timer fires rather than now.
+    func scheduleSessionSave() {
+        SessionStore.shared.scheduleSave { [weak self] in
+            self?.currentSessionSnapshot()
+                ?? SavedSession(windows: [], closedTabs: [], savedAt: Date())
+        }
+    }
+
+    /// Reopens a saved session: one window per saved window, its tabs in order.
+    private func restore(_ session: SavedSession) {
+        for savedWindow in session.windows {
+            var host: BrowserWindowController?
+            for tab in savedWindow.tabs {
+                guard let url = URL(string: tab.url) else { continue }
+                if let host {
+                    host.openInNewTab(url)
+                } else {
+                    host = openNewWindow(url: url)
+                }
+            }
+        }
+        // A session of nothing but unparseable URLs must not leave a browser with no
+        // window at all — there would be no way back except the Dock icon.
+        if controllers.isEmpty {
+            openNewWindow(url: nil)
+        }
+    }
+
+    @objc func reopenLastSession(_ sender: Any?) {
+        guard let previousSession, !previousSession.isEmpty else { return }
+        restore(previousSession)
+    }
+
+    @objc func toggleSessionRestore(_ sender: Any?) {
+        SessionStore.restoresOnLaunch.toggle()
+    }
+
+    // MARK: - History window
+
+    @objc func showHistoryWindow(_ sender: Any?) {
+        HistoryWindowController.shared.show()
     }
 
     // MARK: - Actions
@@ -749,6 +847,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
                                          action: #selector(reopenClosedTab(_:)),
                                          keyEquivalent: "T")
         reopen.keyEquivalentModifierMask = [.command, .shift]
+        historyMenu.addItem(withTitle: "Reopen Last Session",
+                            action: #selector(reopenLastSession(_:)),
+                            keyEquivalent: "")
+        historyMenu.addItem(.separator())
+        historyMenu.addItem(withTitle: "Show History",
+                            action: #selector(showHistoryWindow(_:)),
+                            keyEquivalent: "y")
         historyMenu.addItem(.separator())
         historyMenu.addItem(withTitle: "Home",
                             action: #selector(BrowserWindowController.goHome(_:)),
@@ -780,6 +885,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
                           keyEquivalent: "")
         toolsMenu.addItem(withTitle: "Search Text in Images",
                           action: #selector(toggleImageTextSearch(_:)),
+                          keyEquivalent: "")
+        toolsMenu.addItem(withTitle: "Restore Tabs on Launch",
+                          action: #selector(toggleSessionRestore(_:)),
                           keyEquivalent: "")
         toolsMenu.addItem(.separator())
         let downloadsItem = toolsMenu.addItem(withTitle: "Show Downloads",
@@ -879,6 +987,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
             return NewTabPage.wallpaperURL != nil
         case #selector(reopenClosedTab(_:)):
             return !closedTabs.isEmpty
+        case #selector(reopenLastSession(_:)):
+            guard let previousSession, !previousSession.isEmpty else {
+                menuItem.title = "Reopen Last Session"
+                return false
+            }
+            let count = previousSession.tabCount
+            menuItem.title = "Reopen Last Session (\(count) Tab\(count == 1 ? "" : "s"))"
+            return true
+        case #selector(toggleSessionRestore(_:)):
+            menuItem.state = SessionStore.restoresOnLaunch ? .on : .off
+            return true
         case #selector(toggleSearchSuggestions(_:)):
             menuItem.state = AddressSuggestionProvider.remoteEnabled ? .on : .off
             return true

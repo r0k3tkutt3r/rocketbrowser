@@ -3,7 +3,7 @@ import Foundation
 /// One page view. `dwell` and `viaRedirect` are what let `SuggestionEngine` tell a
 /// destination apart from a waypoint (sign-in redirectors, SSO hops, link shorteners)
 /// without anyone maintaining a list of such domains.
-struct Visit: Codable {
+struct Visit: Codable, Equatable {
     let id: UUID
     let url: String
     let host: String
@@ -17,13 +17,16 @@ struct Visit: Codable {
     /// per visit. This is the engagement signal: a tab left open in the background all
     /// night contributes nothing, and one very long session cannot dominate the model.
     var activeTime: TimeInterval?
+    /// The page's own title, for the history window. nil for visits recorded before
+    /// titles were stored, and for pages that never reported one.
+    var title: String?
 
     /// A single visit contributes at most this much attention.
     static let activeTimeCap: TimeInterval = 15 * 60
 
     init(id: UUID = UUID(), url: String, host: String, ts: Date,
          dwell: TimeInterval? = nil, viaRedirect: Bool = false,
-         activeTime: TimeInterval? = nil) {
+         activeTime: TimeInterval? = nil, title: String? = nil) {
         self.id = id
         self.url = url
         self.host = host
@@ -31,10 +34,11 @@ struct Visit: Codable {
         self.dwell = dwell
         self.viaRedirect = viaRedirect
         self.activeTime = activeTime
+        self.title = title
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, url, host, ts, dwell, viaRedirect, activeTime
+        case id, url, host, ts, dwell, viaRedirect, activeTime, title
     }
 
     /// History files written before dwell tracking decode with the new fields absent.
@@ -47,6 +51,16 @@ struct Visit: Codable {
         dwell = try container.decodeIfPresent(TimeInterval.self, forKey: .dwell)
         viaRedirect = try container.decodeIfPresent(Bool.self, forKey: .viaRedirect) ?? false
         activeTime = try container.decodeIfPresent(TimeInterval.self, forKey: .activeTime)
+        title = try container.decodeIfPresent(String.self, forKey: .title)
+    }
+
+    /// What the history window shows as the row's headline: the page's own title when
+    /// it reported one, otherwise the host — never an empty row.
+    var displayTitle: String {
+        if let title, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return title
+        }
+        return host
     }
 
     /// Attention actually paid to this page. Visits recorded before active-time
@@ -58,6 +72,12 @@ struct Visit: Codable {
     /// False for history recorded before attention tracking existed. Unmeasured is not
     /// the same as brief, and scoring it as a bounce would quietly discard old history.
     var hasEngagementData: Bool { activeTime != nil || dwell != nil }
+}
+
+extension Notification.Name {
+    /// Posted by `HistoryStore` whenever visits are added, retitled or removed, so the
+    /// history window can rebuild. Mirrors `.bookmarksDidChange`.
+    static let historyDidChange = Notification.Name("RocketHistoryDidChange")
 }
 
 /// Local-only visit log used to train new-tab suggestions. Never leaves disk;
@@ -96,7 +116,20 @@ final class HistoryStore {
             visits.removeFirst(visits.count - cap)
         }
         scheduleSave()
+        notifyChanged()
         return visit.id
+    }
+
+    /// Stamps the page's own title once the web view reports one. Titles arrive after
+    /// the visit is recorded, and can change again while the page is open, so this is
+    /// called from the title observer rather than at record time.
+    func setTitle(id: UUID, _ title: String?) {
+        let trimmed = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let trimmed, !trimmed.isEmpty else { return }
+        guard let index = visits.lastIndex(where: { $0.id == id }), visits[index].title != trimmed else { return }
+        visits[index].title = trimmed
+        scheduleSave()
+        notifyChanged()
     }
 
     /// Stamps how long the page was on screen, and how much of that was real attention.
@@ -126,15 +159,36 @@ final class HistoryStore {
         return results
     }
 
+    /// Forgets specific visits. Returns the number actually removed so the caller can
+    /// skip the retrain when a delete was a no-op.
+    @discardableResult
+    func remove(ids: Set<UUID>) -> Int {
+        guard !ids.isEmpty else { return 0 }
+        let before = visits.count
+        visits.removeAll { ids.contains($0.id) }
+        let removed = before - visits.count
+        guard removed > 0 else { return 0 }
+        scheduleSave()
+        notifyChanged()
+        return removed
+    }
+
     func clear() {
         visits = []
         pendingSave?.cancel()
         try? FileManager.default.removeItem(at: fileURL)
+        notifyChanged()
     }
 
     func flush() {
         pendingSave?.cancel()
         saveNow()
+    }
+
+    /// Test harnesses construct a store off the main thread, where posting straight
+    /// away is fine; the app always mutates from the main thread anyway.
+    private func notifyChanged() {
+        NotificationCenter.default.post(name: .historyDidChange, object: nil)
     }
 
     private func scheduleSave() {

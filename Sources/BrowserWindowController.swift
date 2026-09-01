@@ -398,8 +398,13 @@ final class BrowserWindowController: NSWindowController {
                 self?.syncURLField()
                 self?.updateBookmarkItem()
             },
-            webView.observe(\.title) { [weak self] _, _ in
+            webView.observe(\.title) { [weak self] webView, _ in
                 self?.updateWindowTitle()
+                // The title lands after the visit is recorded, and can change again
+                // while the page is open, so the history row is stamped from here.
+                if let visitID = self?.currentVisitID {
+                    HistoryStore.shared.setTitle(id: visitID, webView.title)
+                }
             },
             webView.observe(\.estimatedProgress) { [weak self] webView, _ in
                 self?.progressBar.progress = webView.estimatedProgress
@@ -720,6 +725,10 @@ extension BrowserWindowController: NSWindowDelegate {
         // are deleted as soon as the web view releases them.
         incognitoSession?.detach()
         AppDelegate.shared.unregister(self)
+        // After unregister, so the debounced snapshot sees this tab already gone.
+        // Quitting fires this for every window; the store coalesces those into one
+        // write, and applicationWillTerminate flushes whatever is still pending.
+        AppDelegate.shared.scheduleSessionSave()
     }
 }
 
@@ -979,6 +988,11 @@ extension BrowserWindowController: WKNavigationDelegate {
         }
         let viaRedirect = pendingNavigationViaRedirect
         pendingNavigationViaRedirect = false
+        // Outside the history guards below: the session is what the tabs are showing,
+        // which is worth saving even for a page that is never recorded in history.
+        if !isPrivate {
+            AppDelegate.shared.scheduleSessionSave()
+        }
         if suppressHistoryOnce {
             suppressHistoryOnce = false
             return

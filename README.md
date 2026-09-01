@@ -107,6 +107,20 @@ Requires macOS 14+ and the Xcode Command Line Tools (`xcode-select --install`).
   merely contains it. Private windows ask DuckDuckGo instead of Google. Toggle in Tools → Search Suggestions;
   turning it off keeps the local bookmark/history suggestions, which never leave
   the Mac.
+- **History window** — ⌘Y (History → Show History) opens a searchable list of
+  everywhere you've been, grouped by Today / Yesterday / weekday / date. Search is a
+  plain substring match over page titles, hosts and URLs, so it finds the article you
+  read once last week — deliberately unlike the address bar, which suppresses
+  one-off pages so they can't outrank the sites you actually use. Select rows and
+  press ⌫ to forget them, right-click to open in a new tab or copy the link, or
+  Clear History… to wipe everything. Deleting also removes those visits from what the
+  suggestion model trains on, and schedules a retrain.
+- **Session restore (optional)** — Rocket always remembers the tabs you had open,
+  but never reopens them unless you ask. Tools → **Restore Tabs on Launch** (off by
+  default) brings the whole window/tab layout back at startup; History → **Reopen
+  Last Session** brings it back on demand, whether or not the toggle is on. Incognito
+  windows are never saved. The ⇧⌘T "reopen closed tab" stack now survives a restart
+  too.
 - **Downloads viewer** — toolbar button (or ⌥⌘L) opens a Safari-style list with a
   live progress bar, transfer speed and time remaining, cancel, reveal in Finder,
   and double-click to open. Files land in `~/Downloads` with de-duplicated names,
@@ -189,6 +203,9 @@ Sources/
   NewTabPage.swift               generated start page + wallpaper management
   ContentBlocker.swift           WebKit content rules: ad blocking + cookie banners
   HistoryStore.swift             local visit log for suggestions (capped, debounced)
+  HistoryGrouping.swift          date grouping + search filter for the history window
+  HistoryWindow.swift            the ⌘Y history window
+  SessionStore.swift             saved tabs for optional restore-on-launch
   SuggestionEngine.swift         tiny MLP: trains on (day, time) → site, predicts chips
   WaypointDetector.swift         spots sign-in/redirect hosts from behaviour alone
   URLDisplay.swift               simplified address-bar text + search-query extraction
@@ -206,7 +223,7 @@ build.sh                         swiftc build + icon generation + ad-hoc codesig
 
 ## Known limitations
 
-- No history UI, no find-in-page, no favicons in tabs (kept intentionally small).
+- No favicons in tabs (kept intentionally small).
 - The blocklist is curated and compact, not a full EasyList — it catches the big ad
   networks and consent platforms, not every regional list entry. Add domains in
   `Sources/ContentBlocker.swift`; the rules recompile automatically on next launch.
