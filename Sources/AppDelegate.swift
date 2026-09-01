@@ -126,6 +126,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         return controller
     }
 
+    /// Finds the controller owning a web view — used to route new tab page messages
+    /// back to the tab that actually sent them.
+    func controller(for webView: WKWebView) -> BrowserWindowController? {
+        controllers.first { $0.webView === webView }
+    }
+
     func register(_ controller: BrowserWindowController) {
         controllers.append(controller)
     }
@@ -339,9 +345,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         ContentBlocker.shared.cookieBannersHidden.toggle()
     }
 
+    /// Strips "install Chrome" cards from Google's services (and the same shape of
+    /// browser pitch anywhere else).
+    @objc func togglePromoBlocking(_ sender: Any?) {
+        PromoBlocker.isEnabled.toggle()
+        ContentBlocker.shared.applyToAllWebViews?()
+    }
+
     @objc func toggleFingerprintProtection(_ sender: Any?) {
         PrivacyShield.isEnabled.toggle()
         ContentBlocker.shared.applyToAllWebViews?()
+    }
+
+    /// Whether ⌘F also reads the text inside pictures. Local, on-device Vision work —
+    /// the toggle is about the CPU it costs, not about anything leaving the machine.
+    @objc func toggleImageTextSearch(_ sender: Any?) {
+        ImageTextScanner.isEnabled.toggle()
     }
 
     @objc func chooseWallpaper(_ sender: Any?) {
@@ -394,6 +413,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         SuggestionEngine.shared.retrain { [weak self] _ in
             self?.reloadNewTabPages()
         }
+    }
+
+    /// Drops a currently-suggested host straight from the menu.
+    @objc func stopSuggestingHost(_ sender: NSMenuItem) {
+        guard let host = sender.representedObject as? String else { return }
+        SuggestionEngine.shared.excludeHost(host)
+        reloadNewTabPages()
     }
 
     @objc func excludeCurrentSite(_ sender: Any?) {
@@ -502,6 +528,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
                 item.representedObject = host
             }
         }
+        // The chips themselves, listed so they can be dropped without visiting them —
+        // "Exclude Current Website" is unavailable on the new tab page, which has no host.
+        let currentMenu = NSMenu(title: "Stop Suggesting")
+        let shown = SuggestionEngine.shared.suggestions()
+        if shown.isEmpty {
+            currentMenu.addItem(withTitle: "No suggestions right now",
+                                action: nil, keyEquivalent: "").isEnabled = false
+        } else {
+            for suggestion in shown {
+                let item = currentMenu.addItem(withTitle: suggestion.host,
+                                               action: #selector(stopSuggestingHost(_:)),
+                                               keyEquivalent: "")
+                item.representedObject = suggestion.host
+                item.target = self
+            }
+        }
+        let currentParent = suggestionsMenu.addItem(withTitle: "Stop Suggesting",
+                                                    action: nil, keyEquivalent: "")
+        suggestionsMenu.setSubmenu(currentMenu, for: currentParent)
+
         let excludedParent = suggestionsMenu.addItem(withTitle: "Excluded Websites",
                                                      action: nil, keyEquivalent: "")
         suggestionsMenu.setSubmenu(excludedMenu, for: excludedParent)
@@ -644,6 +690,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         editMenu.addItem(withTitle: "Delete", action: #selector(NSText.delete(_:)), keyEquivalent: "")
         editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editMenu.addItem(.separator())
+        let findParent = editMenu.addItem(withTitle: "Find", action: nil, keyEquivalent: "")
+        let findMenu = NSMenu(title: "Find")
+        findMenu.addItem(withTitle: "Find…",
+                         action: #selector(BrowserWindowController.showFindBar(_:)),
+                         keyEquivalent: "f")
+        findMenu.addItem(withTitle: "Find Next",
+                         action: #selector(BrowserWindowController.findNext(_:)),
+                         keyEquivalent: "g")
+        let findPrevious = findMenu.addItem(withTitle: "Find Previous",
+                                            action: #selector(BrowserWindowController.findPrevious(_:)),
+                                            keyEquivalent: "G")
+        findPrevious.keyEquivalentModifierMask = [.command, .shift]
+        findMenu.addItem(withTitle: "Use Selection for Find",
+                         action: #selector(BrowserWindowController.useSelectionForFind(_:)),
+                         keyEquivalent: "e")
+        findMenu.addItem(withTitle: "Hide Find Bar",
+                         action: #selector(BrowserWindowController.hideFindBar(_:)),
+                         keyEquivalent: "")
+        editMenu.setSubmenu(findMenu, for: findParent)
 
         let viewMenu = addSubmenu("View", to: main)
         viewMenu.addItem(withTitle: "Reload Page",
@@ -706,8 +772,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         toolsMenu.addItem(withTitle: "Fingerprinting Protection",
                           action: #selector(toggleFingerprintProtection(_:)),
                           keyEquivalent: "")
+        toolsMenu.addItem(withTitle: "Hide Browser Install Prompts",
+                          action: #selector(togglePromoBlocking(_:)),
+                          keyEquivalent: "")
         toolsMenu.addItem(withTitle: "Search Suggestions",
                           action: #selector(toggleSearchSuggestions(_:)),
+                          keyEquivalent: "")
+        toolsMenu.addItem(withTitle: "Search Text in Images",
+                          action: #selector(toggleImageTextSearch(_:)),
                           keyEquivalent: "")
         toolsMenu.addItem(.separator())
         let downloadsItem = toolsMenu.addItem(withTitle: "Show Downloads",
@@ -800,12 +872,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         case #selector(toggleFingerprintProtection(_:)):
             menuItem.state = PrivacyShield.isEnabled ? .on : .off
             return true
+        case #selector(togglePromoBlocking(_:)):
+            menuItem.state = PromoBlocker.isEnabled ? .on : .off
+            return true
         case #selector(resetWallpaper(_:)):
             return NewTabPage.wallpaperURL != nil
         case #selector(reopenClosedTab(_:)):
             return !closedTabs.isEmpty
         case #selector(toggleSearchSuggestions(_:)):
             menuItem.state = AddressSuggestionProvider.remoteEnabled ? .on : .off
+            return true
+        case #selector(toggleImageTextSearch(_:)):
+            menuItem.state = ImageTextScanner.isEnabled ? .on : .off
             return true
         case #selector(toggleChunkedDownloads(_:)):
             menuItem.state = ChunkedDownload.isEnabled ? .on : .off

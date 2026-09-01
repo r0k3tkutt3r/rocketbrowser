@@ -43,7 +43,9 @@ Requires macOS 14+ and the Xcode Command Line Tools (`xcode-select --install`).
   `~/Library/Application Support/Rocket/` — nothing leaves your Mac. Private
   windows are never recorded. Suggestions appear after ~25 recorded visits across
   3+ sites, and there's a **Retrain** button right under the chips when you want it
-  refreshed immediately. Beyond day and time, the model learns from how long you
+  refreshed immediately. **Right-click any chip to stop suggesting that site**, or use
+  Tools → New Tab Suggestions → Stop Suggesting; excluded sites are listed under
+  Excluded Websites and can be re-included there. Beyond day and time, the model learns from how long you
   actually spent on a site (counted only while that tab was front-most and Rocket was
   the active app, capped at 15 minutes per visit, so a tab left open overnight isn't
   mistaken for a favourite), which site you came from (so it learns that mail is
@@ -76,6 +78,12 @@ Requires macOS 14+ and the Xcode Command Line Tools (`xcode-select --install`).
   coveryourtracks.eff.org may still label the fingerprint "unique" — with a
   randomized fingerprint that uniqueness is worthless to trackers because it never
   repeats; run the test twice across app restarts to see the hashes change.
+- **Browser-promo removal** — the "Choose Chrome, the browser built by Google" cards
+  Google shows across Search, Gmail, Docs and the rest are removed automatically.
+  Matched by shape rather than by class name (a card-sized block that pitches a
+  browser and offers a way to install it), so it keeps working when Google reshuffles
+  its markup, and it leaves articles that merely discuss Chrome — and Google's actual
+  Chrome download page — alone. Toggle in Tools → Hide Browser Install Prompts.
 - **Cookie popup removal** — blocks the major consent-platform CDNs (OneTrust,
   Cookiebot, Sourcepoint, Didomi, Usercentrics, Quantcast, TrustArc, …), hides known
   banner elements, and unlocks page scrolling the banners leave behind. Toggle in
@@ -87,8 +95,16 @@ Requires macOS 14+ and the Xcode Command Line Tools (`xcode-select --install`).
   URLs directly, bare domains get `https://`, `localhost:…` gets `http://`, and
   anything else searches Google (Brave Search in incognito).
 - **Search suggestions** — a dropdown of your bookmarks, your history and the search
-  engine's own completions; ↑/↓ to pick, Return to go, Esc to dismiss. Private
-  windows ask DuckDuckGo instead of Google. Toggle in Tools → Search Suggestions;
+  engine's own completions; ↑/↓ to pick, Return to go, Esc to dismiss. Updates on
+  every keystroke with no typing pause: local matches draw immediately, engine
+  completions stream in continuously (one request in flight at a time, newest query
+  always wins), and repeated or backspaced queries come straight from an in-memory
+  cache. Which of your past pages get offered is decided by usage, not recency: a
+  site always competes as itself, and a deeper page (a chat thread, an article) only
+  earns its own row once you have actually returned to it and spent time there, so
+  pages you opened once and abandoned fade out on their own. Short queries only match
+  the start of a site name, so a single letter no longer drags in every site that
+  merely contains it. Private windows ask DuckDuckGo instead of Google. Toggle in Tools → Search Suggestions;
   turning it off keeps the local bookmark/history suggestions, which never leave
   the Mac.
 - **Downloads viewer** — toolbar button (or ⌥⌘L) opens a Safari-style list with a

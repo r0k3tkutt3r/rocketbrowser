@@ -15,6 +15,10 @@ final class BrowserWindowController: NSWindowController {
     private let progressBar = ProgressBar(frame: .zero)
     private let bookmarksBar = BookmarksBarView()
     private var bookmarksBarHeight: NSLayoutConstraint!
+    private let findBar = FindBarView()
+    private var findBarHeight: NSLayoutConstraint!
+    private lazy var findController = FindController(webView: webView)
+    private var isFindBarVisible: Bool { findBarHeight.constant > 0 }
     private var reloadToolbarItem: NSToolbarItem?
     private var bookmarkToolbarItem: NSToolbarItem?
     private var observations: [NSKeyValueObservation] = []
@@ -23,8 +27,14 @@ final class BrowserWindowController: NSWindowController {
     private var suppressHistoryOnce = false
 
     private let suggestionsDropdown = SuggestionsDropdown()
-    private var remoteSuggestionTask: URLSessionDataTask?
-    private var suggestionDebounce: DispatchWorkItem?
+    /// Completion request currently on the wire, and the newest query typed while it
+    /// was in flight. At most one request exists at a time; the newest text always wins.
+    private var inFlightSuggestionQuery: String?
+    private var pendingSuggestionQuery: String?
+    /// The last completions received, reused while a newer request is in flight so the
+    /// list keeps its shape instead of collapsing between keystrokes.
+    private var lastRemoteQuery: String?
+    private var lastRemoteItems: [String] = []
     private var downloadsToolbarItem: NSToolbarItem?
     private weak var downloadsButton: NSButton?
     private let downloadsPopover = NSPopover()
@@ -106,16 +116,24 @@ final class BrowserWindowController: NSWindowController {
         bookmarksBar.translatesAutoresizingMaskIntoConstraints = false
         webView.translatesAutoresizingMaskIntoConstraints = false
         progressBar.translatesAutoresizingMaskIntoConstraints = false
+        findBar.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(bookmarksBar)
+        content.addSubview(findBar)
         content.addSubview(webView)
         content.addSubview(progressBar)
         bookmarksBarHeight = bookmarksBar.heightAnchor.constraint(equalToConstant: 30)
+        // Zero-height while hidden, matching how the bookmarks bar collapses.
+        findBarHeight = findBar.heightAnchor.constraint(equalToConstant: 0)
         NSLayoutConstraint.activate([
             bookmarksBar.topAnchor.constraint(equalTo: content.topAnchor),
             bookmarksBar.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             bookmarksBar.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             bookmarksBarHeight,
-            webView.topAnchor.constraint(equalTo: bookmarksBar.bottomAnchor),
+            findBar.topAnchor.constraint(equalTo: bookmarksBar.bottomAnchor),
+            findBar.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            findBar.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            findBarHeight,
+            webView.topAnchor.constraint(equalTo: findBar.bottomAnchor),
             webView.bottomAnchor.constraint(equalTo: content.bottomAnchor),
             webView.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             webView.trailingAnchor.constraint(equalTo: content.trailingAnchor),
@@ -150,11 +168,12 @@ final class BrowserWindowController: NSWindowController {
             self?.updateBookmarkItem()
         }
 
-        // The new tab page's retrain button posts here. Remove first: popups share the
-        // opener's userContentController, and adding a duplicate name throws.
+        // The new tab page posts here. One shared bridge handles every tab: popups
+        // inherit the opener's userContentController, so a per-controller handler got
+        // torn out from under the opener whenever a popup registered or closed.
         let userContent = webView.configuration.userContentController
         userContent.removeScriptMessageHandler(forName: "rocket")
-        userContent.add(self, name: "rocket")
+        userContent.add(NewTabPageBridge.shared, name: "rocket")
 
         // Attention is only counted while Rocket itself is frontmost.
         let center = NotificationCenter.default
@@ -170,6 +189,7 @@ final class BrowserWindowController: NSWindowController {
         ]
 
         configureURLField()
+        configureFindBar()
         configureToolbar()
         startObservations()
     }
@@ -259,18 +279,52 @@ final class BrowserWindowController: NSWindowController {
             accessibilityDescription: "Downloads")
     }
 
+    // MARK: - Find in page
+
+    private func configureFindBar() {
+        findBar.isHidden = true
+        findBar.onQueryChanged = { [weak self] text in
+            self?.findController.search(text)
+        }
+        findBar.onNext = { [weak self] in self?.findController.step(1) }
+        findBar.onPrevious = { [weak self] in self?.findController.step(-1) }
+        findBar.onClose = { [weak self] in self?.hideFindBar(nil) }
+        findController.onResults = { [weak self] total, index, scanning in
+            self?.findBar.showResults(total: total, index: index, scanning: scanning)
+        }
+    }
+
+    private func setFindBarVisible(_ visible: Bool) {
+        guard visible != isFindBarVisible else { return }
+        if visible { findBar.isHidden = false }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.12
+            findBarHeight.animator().constant = visible ? FindBarView.barHeight : 0
+        } completionHandler: { [weak self] in
+            guard let self else { return }
+            if !self.isFindBarVisible { self.findBar.isHidden = true }
+        }
+    }
+
     // MARK: - Address bar suggestions
 
     private func refreshSuggestions() {
-        suggestionDebounce?.cancel()
-        remoteSuggestionTask?.cancel()
-
-        let text = urlField.stringValue
+        // Read the field editor, not stringValue: it is the authority mid-edit.
+        let text = urlField.currentEditor()?.string ?? urlField.stringValue
         guard !text.trimmingCharacters(in: .whitespaces).isEmpty else {
             suggestionsDropdown.hide()
+            lastRemoteQuery = nil
+            lastRemoteItems = []
             return
         }
+        // Draw on this keystroke, from local data plus any completions already known.
+        renderSuggestions(for: text)
+        requestRemoteSuggestions(for: text)
+    }
 
+    /// Everything that can be shown without waiting: bookmarks, history, the literal
+    /// typed text, and cached (or carried-forward) engine completions.
+    private func renderSuggestions(for text: String) {
         var results = AddressSuggestionProvider.local(for: text)
         // The literal typed text always leads, so Return does what it looks like.
         if let direct = URLResolver.resolve(text, privateSearch: isPrivate) {
@@ -280,30 +334,53 @@ final class BrowserWindowController: NSWindowController {
                                              subtitle: isSearch ? "Search" : "Open",
                                              url: direct), at: 0)
         }
-        suggestionsDropdown.show(results, below: urlField)
 
-        // Remote completions land a beat later and are appended without disturbing
-        // whatever the user has already selected with the arrow keys.
-        let work = DispatchWorkItem { [weak self] in
+        // Exact completions if we have them; otherwise keep showing the previous
+        // query's completions while they are still a plausible prefix, so the list
+        // stays populated as the user keeps typing.
+        var completions = AddressSuggestionProvider.cached(for: text)
+        if completions == nil, let previous = lastRemoteQuery,
+           text.lowercased().hasPrefix(previous.lowercased()) {
+            completions = lastRemoteItems
+        }
+        for completion in (completions ?? []).prefix(5) {
+            guard !results.contains(where: { $0.title.caseInsensitiveCompare(completion) == .orderedSame }),
+                  let url = URLResolver.resolve(completion, privateSearch: isPrivate) else { continue }
+            results.append(AddressSuggestion(kind: .search, title: completion, subtitle: nil, url: url))
+        }
+        suggestionsDropdown.show(results, below: urlField)
+    }
+
+    /// One request in flight at a time, no debounce. Typing while a request is out
+    /// records the newest query and fires it the moment the current one lands — which
+    /// keeps completions arriving continuously instead of only after a typing pause.
+    private func requestRemoteSuggestions(for text: String) {
+        if let hit = AddressSuggestionProvider.cached(for: text) {
+            lastRemoteQuery = text
+            lastRemoteItems = hit
+            return                                  // already rendered from cache
+        }
+        guard inFlightSuggestionQuery == nil else {
+            pendingSuggestionQuery = text
+            return
+        }
+        inFlightSuggestionQuery = text
+        AddressSuggestionProvider.remote(for: text, privateSearch: isPrivate) { [weak self] completions in
             guard let self else { return }
-            self.remoteSuggestionTask = AddressSuggestionProvider.remote(
-                for: text, privateSearch: self.isPrivate
-            ) { [weak self] completions in
-                guard let self, self.urlField.stringValue == text else { return }
-                var merged = results
-                for completion in completions.prefix(5) {
-                    guard !merged.contains(where: { $0.title.caseInsensitiveCompare(completion) == .orderedSame }),
-                          let url = URLResolver.resolve(completion, privateSearch: self.isPrivate) else { continue }
-                    merged.append(AddressSuggestion(kind: .search, title: completion,
-                                                    subtitle: nil, url: url))
-                }
-                if self.window?.firstResponder === self.urlField.currentEditor() {
-                    self.suggestionsDropdown.show(merged, below: self.urlField)
-                }
+            self.inFlightSuggestionQuery = nil
+            if !completions.isEmpty {
+                self.lastRemoteQuery = text
+                self.lastRemoteItems = completions
+            }
+            let current = self.urlField.currentEditor()?.string ?? self.urlField.stringValue
+            if current == text, self.window?.firstResponder === self.urlField.currentEditor() {
+                self.renderSuggestions(for: current)
+            }
+            if let pending = self.pendingSuggestionQuery {
+                self.pendingSuggestionQuery = nil
+                if pending != text { self.requestRemoteSuggestions(for: pending) }
             }
         }
-        suggestionDebounce = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
     }
 
     private func configureToolbar() {
@@ -436,6 +513,54 @@ final class BrowserWindowController: NSWindowController {
 
     @objc func reloadPage(_ sender: Any?) {
         webView.reload()
+    }
+
+    @objc func showFindBar(_ sender: Any?) {
+        ImageTextScanner.warmUp()
+        let wasVisible = isFindBarVisible
+        setFindBarVisible(true)
+        // Opening on a fresh selection searches for it, the way Safari does. An already
+        // open bar just takes focus back so ⌘F never destroys what is being typed.
+        guard !wasVisible else {
+            findBar.focusField()
+            return
+        }
+        findController.currentSelection { [weak self] selection in
+            guard let self else { return }
+            if !selection.isEmpty {
+                self.findBar.field.stringValue = selection
+                self.findController.search(selection, immediately: true)
+            } else if !self.findBar.field.stringValue.isEmpty {
+                self.findController.search(self.findBar.field.stringValue, immediately: true)
+            }
+            self.findBar.focusField()
+        }
+    }
+
+    @objc func hideFindBar(_ sender: Any?) {
+        setFindBarVisible(false)
+        findController.clear()
+        findBar.showResults(total: 0, index: -1, scanning: false)
+        window?.makeFirstResponder(webView)
+    }
+
+    @objc func findNext(_ sender: Any?) {
+        guard isFindBarVisible else { showFindBar(sender); return }
+        findController.step(1)
+    }
+
+    @objc func findPrevious(_ sender: Any?) {
+        guard isFindBarVisible else { showFindBar(sender); return }
+        findController.step(-1)
+    }
+
+    @objc func useSelectionForFind(_ sender: Any?) {
+        findController.currentSelection { [weak self] selection in
+            guard let self, !selection.isEmpty else { return }
+            self.setFindBarVisible(true)
+            self.findBar.field.stringValue = selection
+            self.findController.search(selection, immediately: true)
+        }
     }
 
     @objc func stopLoadingPage(_ sender: Any?) {
@@ -572,11 +697,10 @@ extension BrowserWindowController: NSWindowDelegate {
         // Stamp the dwell time for the page on screen, then offer the tab to ⇧⌘T.
         pauseActiveTiming()
         closeCurrentVisit()
-        // Breaks the retain cycle: the content controller holds its message handlers.
-        webView.configuration.userContentController.removeScriptMessageHandler(forName: "rocket")
         for observer in focusObservers { NotificationCenter.default.removeObserver(observer) }
         focusObservers.removeAll()
         suggestionsDropdown.hide()
+        findController.teardown()
         if !isPrivate, let url = webView.url, !NewTabPage.isNewTabURL(url) {
             AppDelegate.shared.recordClosedTab(url: url, title: webView.title)
         }
@@ -700,6 +824,10 @@ extension BrowserWindowController: NSMenuItemValidation {
             return webView.canGoForward
         case #selector(stopLoadingPage(_:)):
             return webView.isLoading
+        case #selector(findNext(_:)), #selector(findPrevious(_:)):
+            return isFindBarVisible || !findBar.field.stringValue.isEmpty
+        case #selector(hideFindBar(_:)):
+            return isFindBarVisible
         case #selector(toggleBookmark(_:)):
             guard let urlString = webView.url?.absoluteString,
                   !urlString.isEmpty, urlString != "about:blank",
@@ -845,6 +973,10 @@ extension BrowserWindowController: WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        // A find bar left open should describe the page now on screen.
+        if isFindBarVisible, !findBar.field.stringValue.isEmpty {
+            findController.search(findBar.field.stringValue, immediately: true)
+        }
         let viaRedirect = pendingNavigationViaRedirect
         pendingNavigationViaRedirect = false
         if suppressHistoryOnce {
@@ -867,6 +999,8 @@ extension BrowserWindowController: WKNavigationDelegate {
     /// dwell time this produces is what separates waypoints from real destinations.
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         closeCurrentVisit()
+        // The engine was injected into the outgoing document; it leaves with it.
+        findController.pageChanged()
     }
 
     func closeCurrentVisit() {
@@ -1019,21 +1153,58 @@ extension BrowserWindowController: WKUIDelegate {
     }
 }
 
+extension BrowserWindowController {
+    /// Confirms, then drops a host from the suggestion model and redraws the page.
+    func confirmExcludeSuggestion(host: String) {
+        guard let window else { return }
+        let alert = NSAlert()
+        alert.messageText = "Stop suggesting \(host)?"
+        alert.informativeText = """
+        \(host) will no longer appear as a new tab suggestion. Your history is not \
+        changed, and you can undo this from Tools ▸ New Tab Suggestions ▸ Excluded Websites.
+        """
+        alert.addButton(withTitle: "Stop Suggesting")
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn, let self else { return }
+            SuggestionEngine.shared.excludeHost(host)
+            if NewTabPage.isNewTabURL(self.webView.url) {
+                NewTabPage.open(in: self.webView)
+            }
+        }
+    }
+}
+
 // MARK: - New tab page messages
 
-extension BrowserWindowController: WKScriptMessageHandler {
+/// Single handler for every tab's new tab page. It routes on `message.webView` rather
+/// than on a captured controller, because popups share their opener's content
+/// controller — a per-tab handler ended up reloading the wrong tab, and vanished
+/// entirely when the popup closed, leaving the opener's button spinning forever.
+final class NewTabPageBridge: NSObject, WKScriptMessageHandler {
+
+    static let shared = NewTabPageBridge()
+
     func userContentController(_ userContentController: WKUserContentController,
                                didReceive message: WKScriptMessage) {
         guard message.name == "rocket",
               let body = message.body as? [String: Any],
-              let action = body["action"] as? String else { return }
+              let action = body["action"] as? String,
+              let sender = message.webView else { return }
+        let controller = AppDelegate.shared.controller(for: sender)
+
         switch action {
+        case "excludeSuggestion":
+            guard let host = body["host"] as? String, !host.isEmpty else { return }
+            controller?.confirmExcludeSuggestion(host: host)
+
         case "retrain":
-            SuggestionEngine.shared.retrain { [weak self] _ in
-                // Regenerating the page is what shows the new chips.
-                guard let self, NewTabPage.isNewTabURL(self.webView.url) else { return }
-                NewTabPage.open(in: self.webView)
+            SuggestionEngine.shared.retrain { _ in
+                // Always redraw the page that asked, so its button cannot stay stuck.
+                guard NewTabPage.isNewTabURL(sender.url) else { return }
+                NewTabPage.open(in: sender)
             }
+
         default:
             break
         }

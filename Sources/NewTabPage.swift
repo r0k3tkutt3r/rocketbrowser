@@ -121,7 +121,10 @@ enum NewTabPage {
         var suggestionsHTML = ""
         if !suggestions.isEmpty {
             let chips = suggestions.map { suggestion in
-                "<a class=\"chip\" href=\"\(htmlEscaped(suggestion.url))\">\(htmlEscaped(suggestion.host))</a>"
+                "<a class=\"chip\" href=\"\(htmlEscaped(suggestion.url))\" "
+                    + "data-host=\"\(htmlEscaped(suggestion.host))\" "
+                    + "title=\"Right-click to stop suggesting this site\">"
+                    + "\(htmlEscaped(suggestion.host))</a>"
             }.joined()
             suggestionsHTML = "<div class=\"chips\">\(chips)</div>"
         }
@@ -181,13 +184,37 @@ enum NewTabPage {
             }
             tick();
             setInterval(tick, 10000);
+            // Right-clicking a chip asks Swift to drop that site from the model.
+            document.addEventListener('contextmenu', function (event) {
+                const chip = event.target.closest('.chip');
+                if (!chip) { return; }
+                event.preventDefault();
+                window.webkit.messageHandlers.rocket.postMessage({
+                    action: 'excludeSuggestion', host: chip.dataset.host
+                });
+            });
             function retrain() {
                 const button = document.getElementById('retrain');
                 button.disabled = true;
                 button.textContent = 'Retraining…';
                 // Swift reloads this page when training finishes, so there is no
                 // success state to render here.
-                window.webkit.messageHandlers.rocket.postMessage({ action: 'retrain' });
+                try {
+                    window.webkit.messageHandlers.rocket.postMessage({ action: 'retrain' });
+                } catch (e) {
+                    restoreRetrainButton();
+                    return;
+                }
+                // Swift reloads this page when training finishes. If that somehow does
+                // not happen, put the control back rather than leaving it spinning.
+                setTimeout(restoreRetrainButton, 8000);
+            }
+            function restoreRetrainButton() {
+                const button = document.getElementById('retrain');
+                if (button && button.disabled) {
+                    button.disabled = false;
+                    button.textContent = 'Retrain suggestions';
+                }
             }
         </script>
         </body>

@@ -42,10 +42,13 @@ enum AddressSuggestionProvider {
             if results.count >= limit { return results }
         }
 
-        for visit in HistoryStore.shared.recentHosts(matching: needle, limit: limit) {
-            guard let url = URL(string: visit.url), seen.insert(visit.url).inserted else { continue }
-            results.append(AddressSuggestion(kind: .history, title: URLDisplay.rootDomain(visit.host),
-                                             subtitle: url.path.count > 1 ? url.path : nil, url: url))
+        // Ranked by how much you actually use each page, so a page you opened once and
+        // abandoned cannot outrank the site itself.
+        for candidate in HistoryRanker.matches(for: needle, in: HistoryStore.shared.visits, limit: limit) {
+            guard let url = URL(string: candidate.url), seen.insert(candidate.url).inserted else { continue }
+            results.append(AddressSuggestion(kind: .history,
+                                             title: URLDisplay.rootDomain(candidate.host),
+                                             subtitle: candidate.detail, url: url))
             if results.count >= limit { break }
         }
         return results
@@ -58,8 +61,48 @@ enum AddressSuggestionProvider {
         }
     }
 
+    /// A connection kept warm for completions only. Ephemeral so these keystroke
+    /// requests carry no cookies, and configured for latency rather than throughput:
+    /// one reused HTTP/2 connection, short timeout, no disk cache in the way.
+    private static let session: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.urlCache = nil
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        config.timeoutIntervalForRequest = 3
+        config.waitsForConnectivity = false
+        config.httpMaximumConnectionsPerHost = 2
+        return URLSession(configuration: config)
+    }()
+
+    /// Completions already fetched this session, keyed by query. Typing forward and
+    /// backspacing both replay through here, which is what makes editing feel instant
+    /// instead of re-hitting the network for a prefix already seen.
+    private static var cache: [String: [String]] = [:]
+    private static var cacheOrder: [String] = []
+    private static let cacheLimit = 300
+
+    static func cached(for text: String) -> [String]? {
+        cache[cacheKey(text)]
+    }
+
+    private static func cacheKey(_ text: String) -> String {
+        text.trimmingCharacters(in: .whitespaces).lowercased()
+    }
+
+    private static func store(_ completions: [String], for text: String) {
+        let key = cacheKey(text)
+        if cache[key] == nil {
+            cacheOrder.append(key)
+            if cacheOrder.count > cacheLimit {
+                cache.removeValue(forKey: cacheOrder.removeFirst())
+            }
+        }
+        cache[key] = completions
+    }
+
     /// The engine's own completions. Private windows ask DuckDuckGo, matching the
     /// private-search choice, so incognito typing never reaches Google.
+    @discardableResult
     static func remote(for text: String, privateSearch: Bool,
                        completion: @escaping ([String]) -> Void) -> URLSessionDataTask? {
         guard remoteEnabled else { return nil }
@@ -67,14 +110,21 @@ enum AddressSuggestionProvider {
         guard !trimmed.isEmpty,
               let encoded = trimmed.addingPercentEncoding(withAllowedCharacters: .alphanumerics) else { return nil }
 
+        // Answer from cache in this same runloop turn — no network, no waiting.
+        if let hit = cache[cacheKey(text)] {
+            completion(hit)
+            return nil
+        }
+
         let endpoint = privateSearch
             ? "https://duckduckgo.com/ac/?type=list&q=\(encoded)"
             : "https://suggestqueries.google.com/complete/search?client=firefox&q=\(encoded)"
         guard let url = URL(string: endpoint) else { return nil }
 
         var request = URLRequest(url: url)
-        request.timeoutInterval = 4
-        let task = URLSession.shared.dataTask(with: request) { data, _, _ in
+        request.timeoutInterval = 3
+        request.assumesHTTP3Capable = true
+        let task = session.dataTask(with: request) { data, _, _ in
             // Both engines answer with ["typed text", ["suggestion", …]].
             guard let data,
                   let root = try? JSONSerialization.jsonObject(with: data) as? [Any],
@@ -82,7 +132,10 @@ enum AddressSuggestionProvider {
                 DispatchQueue.main.async { completion([]) }
                 return
             }
-            DispatchQueue.main.async { completion(list) }
+            DispatchQueue.main.async {
+                store(list, for: text)
+                completion(list)
+            }
         }
         task.resume()
         return task
@@ -145,16 +198,23 @@ final class SuggestionsDropdown {
         self.anchor = field
         if let selectedIndex, selectedIndex >= suggestions.count { self.selectedIndex = nil }
 
-        for view in stack.arrangedSubviews { view.removeFromSuperview() }
-        rows = suggestions.enumerated().map { index, suggestion in
-            let row = SuggestionRow(suggestion: suggestion) { [weak self] in
+        // Reuse row views: this runs on every keystroke and on every batch of
+        // completions, so rebuilding the view tree each time showed up as a stutter.
+        while rows.count < suggestions.count {
+            let row = SuggestionRow { [weak self] index in
                 self?.accept(at: index)
             }
             row.translatesAutoresizingMaskIntoConstraints = false
             stack.addArrangedSubview(row)
             row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
             row.heightAnchor.constraint(equalToConstant: 30).isActive = true
-            return row
+            rows.append(row)
+        }
+        while rows.count > suggestions.count {
+            rows.removeLast().removeFromSuperview()
+        }
+        for (index, suggestion) in suggestions.enumerated() {
+            rows[index].update(with: suggestion, index: index)
         }
         highlightSelection()
 
@@ -212,7 +272,8 @@ final class SuggestionRow: NSView {
     private let iconView = NSImageView()
     private let titleLabel = NSTextField(labelWithString: "")
     private let subtitleLabel = NSTextField(labelWithString: "")
-    private let onClick: () -> Void
+    private let onClick: (Int) -> Void
+    private var index = 0
 
     var isHighlighted = false {
         didSet {
@@ -224,20 +285,17 @@ final class SuggestionRow: NSView {
         }
     }
 
-    init(suggestion: AddressSuggestion, onClick: @escaping () -> Void) {
+    init(onClick: @escaping (Int) -> Void) {
         self.onClick = onClick
         super.init(frame: .zero)
         wantsLayer = true
 
-        iconView.image = NSImage(systemSymbolName: suggestion.symbolName, accessibilityDescription: nil)
         iconView.contentTintColor = .secondaryLabelColor
         titleLabel.font = .systemFont(ofSize: 12.5)
         titleLabel.lineBreakMode = .byTruncatingTail
-        titleLabel.stringValue = suggestion.title
         subtitleLabel.font = .systemFont(ofSize: 11)
         subtitleLabel.textColor = .secondaryLabelColor
         subtitleLabel.lineBreakMode = .byTruncatingTail
-        subtitleLabel.stringValue = suggestion.subtitle ?? ""
 
         for view in [iconView, titleLabel, subtitleLabel] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
@@ -263,7 +321,16 @@ final class SuggestionRow: NSView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
+    /// Swaps in new content without rebuilding the view or its constraints.
+    func update(with suggestion: AddressSuggestion, index: Int) {
+        self.index = index
+        iconView.image = NSImage(systemSymbolName: suggestion.symbolName, accessibilityDescription: nil)
+        if titleLabel.stringValue != suggestion.title { titleLabel.stringValue = suggestion.title }
+        let subtitle = suggestion.subtitle ?? ""
+        if subtitleLabel.stringValue != subtitle { subtitleLabel.stringValue = subtitle }
+    }
+
     override func mouseEntered(with event: NSEvent) { isHighlighted = true }
     override func mouseExited(with event: NSEvent) { isHighlighted = false }
-    override func mouseDown(with event: NSEvent) { onClick() }
+    override func mouseDown(with event: NSEvent) { onClick(index) }
 }

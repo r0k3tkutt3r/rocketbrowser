@@ -26,7 +26,6 @@ final class DownloadItem {
     }
 
     let id = UUID()
-    let startedAt = Date()
     weak var download: WKDownload?
 
     /// Set once this download has been handed off from WebKit to Rocket's own parallel

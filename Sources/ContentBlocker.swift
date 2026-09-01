@@ -70,6 +70,11 @@ final class ContentBlocker {
                 userContent.addUserScript(script)
             }
         }
+        if PromoBlocker.isEnabled {
+            for script in PromoBlocker.userScripts() {
+                userContent.addUserScript(script)
+            }
+        }
     }
 
     // MARK: - Compilation
