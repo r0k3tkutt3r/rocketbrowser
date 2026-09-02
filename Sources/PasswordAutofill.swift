@@ -120,10 +120,16 @@ enum PasswordAutofill {
                 // Two password boxes, or an explicit new-password hint, means the user is
                 // creating an account rather than signing in.
                 var isSignUp = group.length >= 2 || group.some(function (p) {
-                    return (p.getAttribute('autocomplete') || '').toLowerCase() === 'new-password';
+                    // A token list: "section-signup new-password" is valid and must count.
+                    return (p.getAttribute('autocomplete') || '').toLowerCase().split(/\s+/).indexOf('new-password') >= 0;
                 });
+                var user = usernameFor(group[0]);
                 records.push({ form: form, password: group[0], passwords: group,
-                               username: usernameFor(group[0]), isSignUp: isSignUp });
+                               username: user, isSignUp: isSignUp,
+                               // Only a field that announces itself as a username counts as
+                               // evidence that this is a sign-in form; `usernameFor` will
+                               // otherwise fall back to whatever text box came last.
+                               usernameAnnounced: !!(user && looksLikeUsername(user)) });
             });
             return records;
         }
@@ -131,8 +137,14 @@ enum PasswordAutofill {
         function scopeOf(record) {
             if (record.form) { return record.form; }
             var base = record.username ? commonAncestor(record.username, record.password) : record.password.parentElement;
-            for (var i = 0; i < 3 && base && base.parentElement && base.parentElement !== document.body; i++) {
-                base = base.parentElement;
+            // Stop AT body, not one past it: the old guard only refused to step *to*
+            // body, so a base that was already body climbed to <html> and the submit
+            // search then ranged over the entire document.
+            for (var i = 0; i < 3; i++) {
+                if (!base || base === document.body || base === document.documentElement) { break; }
+                var parent = base.parentElement;
+                if (!parent || parent === document.body || parent === document.documentElement) { break; }
+                base = parent;
             }
             return base || document.body;
         }
@@ -179,7 +191,12 @@ enum PasswordAutofill {
         // --- focus ----------------------------------------------------------------
         var focused = null;
         var panel = { visible: false, hasSelection: false };
+        // Filling focuses the username box and then the password box, which produces
+        // real focus events. Without this the account panel springs back up over a form
+        // Rocket has already completed.
+        var suppressFocusUntil = 0;
         function reportFocus(el) {
+            if (Date.now() < suppressFocusUntil) { return; }
             var info = classify(el);
             if (!info) {
                 if (focused) { focused = null; panel.visible = false; post({ action: 'fieldBlurred' }); }
@@ -190,8 +207,16 @@ enum PasswordAutofill {
                    isSignUp: !!(info.record && info.record.isSignUp), usernameOnly: info.usernameOnly,
                    rect: rectOf(el) });
         }
-        document.addEventListener('focusin', function (e) { reportFocus(e.target); }, true);
+        // Every listener below is trusted-only. A page can dispatch any DOM event it
+        // likes and it reaches this world too, so an ungated `focusin` would let a page
+        // raise the real account panel over a decoy of its own drawing, and an ungated
+        // `submit` would let it forge a save prompt for a password it chose.
+        document.addEventListener('focusin', function (e) {
+            if (!e.isTrusted) { return; }
+            reportFocus(e.target);
+        }, true);
         document.addEventListener('focusout', function (e) {
+            if (!e.isTrusted) { return; }
             if (focused && e.target === focused.el) {
                 focused = null;
                 panel.visible = false;
@@ -238,6 +263,8 @@ enum PasswordAutofill {
             }
         }, true);
         document.addEventListener('input', function (e) {
+            // Rocket's own fills call touched.add directly, so gating this costs nothing.
+            if (!e.isTrusted) { return; }
             if (e.target && e.target.tagName === 'INPUT') { touched.add(e.target); }
         }, true);
 
@@ -245,6 +272,7 @@ enum PasswordAutofill {
         // notice the change instead of reverting it on the next render ---------------
         function setValue(el, value) {
             if (!el) { return; }
+            suppressFocusUntil = Date.now() + 700;
             try { el.focus(); } catch (e) {}
             nativeValueSetter.call(el, value);
             el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -255,27 +283,60 @@ enum PasswordAutofill {
         // Safari signs you in outright once Touch ID succeeds; this is the same idea.
         // Never called for a generated password on a sign-up form, where the person
         // still has other boxes to fill in.
-        var submitWords = /log ?in|log ?on|sign ?in|sign ?on|submit|continue|next|proceed|enter|go|done|confirm/i;
-        var notSubmitWords = /forgot|reset|cancel|back|show|hide|reveal|toggle|sign ?up|register|create|new account|help|support|privacy|terms|remember/i;
+        // Word-bounded, or "go" matches Google and Logout, "enter" matches Enterprise,
+        // and "back" matches Feedback.
+        var submitWords = /\b(log ?in|log ?on|sign ?in|sign ?on|submit|continue|next|proceed|done|go|ok)\b/i;
+        // Loose on purpose: over-matching here only means Rocket declines to submit.
+        // The destructive verbs are the point — a password box guarding "Delete account"
+        // must never be treated as a sign-in form.
+        var notSubmitWords = /forgot|reset|cancel|back|show|hide|reveal|toggle|sign ?up|register|create|new account|help|support|privacy|terms|remember|delete|remove|disable|deactivate|close|revoke|export|download|pay|purchase|buy|checkout|transfer|send|withdraw|authorat|authoris|authoriz|unlink|leave|destroy|erase|wipe|terminate|unsubscribe/i;
 
+        /// Visible is not the same as clickable. Opacity does not inherit, so a button
+        /// inside a faded-out modal computes opacity 1 on itself, and a control parked
+        /// at left:-9999px has a perfectly ordinary rectangle.
+        function isClickable(el) {
+            if (!isVisible(el) || el.disabled || el.getAttribute('aria-disabled') === 'true') { return false; }
+            var node = el;
+            while (node && node !== document.documentElement) {
+                var style = getComputedStyle(node);
+                if (style.opacity === '0' || style.visibility === 'hidden'
+                    || style.display === 'none' || style.pointerEvents === 'none') { return false; }
+                node = node.parentElement;
+            }
+            var rect = el.getBoundingClientRect();
+            if (rect.right < 1 || rect.bottom < 1) { return false; }
+            // Where it is on screen, confirm it is what a click would actually land on.
+            if (rect.top < window.innerHeight && rect.left < window.innerWidth) {
+                var hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+                if (!hit || (hit !== el && !el.contains(hit))) { return false; }
+            }
+            return true;
+        }
+
+        /// The control that signs you in. Every candidate must clear the allow-list —
+        /// not merely miss the deny-list — because the deny-list can only ever name
+        /// dangers someone thought of, and the cost of guessing wrong is pressing a
+        /// button the user never asked for.
         function findSubmitButton(scope, record) {
             var candidates = scope.querySelectorAll(
                 'button, input[type=submit], input[type=image], input[type=button], [role=button]');
-            var best = null;
+            var strong = null, weak = null;
             for (var i = 0; i < candidates.length; i++) {
                 var el = candidates[i];
-                if (!isVisible(el) || el.disabled) { continue; }
+                // It has to come after the password box. This is what stops the
+                // "Continue with Google" row above a login form from being chosen.
+                if (!precedes(record.password, el)) { continue; }
+                if (record.form && el.form !== record.form && !record.form.contains(el)) { continue; }
+                if (!isClickable(el)) { continue; }
                 var label = ((el.textContent || '') + ' ' + (el.getAttribute('aria-label') || '')
                     + ' ' + (el.value || '') + ' ' + (el.getAttribute('title') || '')).trim();
-                if (notSubmitWords.test(label)) { continue; }
+                if (notSubmitWords.test(label) || !submitWords.test(label)) { continue; }
                 var type = (el.getAttribute('type') || '').toLowerCase();
-                // A real submit control wins outright.
                 if (type === 'submit' || type === 'image' || (el.tagName === 'BUTTON' && !type)) {
-                    if (!record.form || el.form === record.form || record.form.contains(el)) { return el; }
-                }
-                if (!best && submitWords.test(label)) { best = el; }
+                    if (!strong) { strong = el; }
+                } else if (!weak) { weak = el; }
             }
-            return best;
+            return strong || weak;
         }
 
         // What a person does: Return in the password box. Frameworks listen for this,
@@ -331,10 +392,25 @@ enum PasswordAutofill {
                 record.passwords.forEach(function (p) { setValue(p, password); filledByRocket.set(p, password); });
             }
             try { el.focus(); } catch (e) {}
-            if (submit && !record.isSignUp) {
+            // Submitting needs positive evidence that this IS a sign-in form, not just
+            // the absence of evidence that it is a sign-up. A lone password box guarding
+            // "Enter your password to delete your account" has no username field, and
+            // pressing its button is not something to guess at.
+            if (submit && !record.isSignUp && record.usernameAnnounced) {
+                var expected = password;
                 // A beat first, so a framework has processed the input events and its
                 // sign-in button is no longer disabled by its own validation.
-                setTimeout(function () { submitLogin(record, el); }, 150);
+                setTimeout(function () {
+                    // The page owns those 150 ms: it can re-render the form, clear the
+                    // box, or navigate. Submitting a stale or emptied form burns a login
+                    // attempt, and enough of those lock an account.
+                    var again = classify(el);
+                    if (!again || again.usernameOnly || !again.record) { return; }
+                    var current = again.record;
+                    if (current.password !== record.password || current.isSignUp) { return; }
+                    if (expected != null && current.password.value !== expected) { return; }
+                    submitLogin(current, el);
+                }, 150);
             }
             return true;
         }
@@ -395,10 +471,12 @@ enum PasswordAutofill {
             if (info.usernameOnly) { captureUsername(e.target); } else { capture(info.record); }
         }
         document.addEventListener('submit', function (e) {
+            if (!e.isTrusted) { return; }
             captureAll(function (record) { return record.form === e.target; });
             captureUsernameOnly();
         }, true);
         document.addEventListener('click', function (e) {
+            if (!e.isTrusted) { return; }
             var button = e.target && e.target.closest
                 ? e.target.closest('button, input[type=submit], input[type=button], input[type=image], [role=button]')
                 : null;
@@ -514,6 +592,16 @@ final class PasswordAutofillController {
         return (CGRect(x: x, y: y, width: width, height: height), CGFloat(viewportWidth))
     }
 
+    /// Filling is refused over plain http, where the credential would cross the
+    /// network readable by anyone on the path. Loopback is the exception: there is no
+    /// network hop, and refusing there would break local development for no gain.
+    static func allowsFilling(on url: URL, host: String) -> Bool {
+        let scheme = url.scheme?.lowercased() ?? ""
+        if scheme == "https" { return true }
+        if scheme == "http" { return SiteMatcher.isLoopback(host) }
+        return false
+    }
+
     /// A frame belongs to this page only when its registrable domain matches. Without
     /// this, a third-party iframe could be offered — and filled with — the credentials
     /// of the site embedding it.
@@ -547,8 +635,18 @@ final class PasswordAutofillController {
 
         let store = PasswordStore.shared
         var items: [PasswordDropdownItem] = []
-        if pageURL.scheme?.lowercased() == "http" {
-            items.append(.caption("Not secure: this page isn't encrypted"))
+        // A password handed to an unencrypted page goes out over the wire in clear
+        // text, to whoever is listening. A warning row was not enough: it left the
+        // decision with someone who has no way to judge it. Loopback is exempt because
+        // there is no network to intercept.
+        guard Self.allowsFilling(on: pageURL, host: pageHost) else {
+            if let window = owner.window, let anchor = screenRect(for: field) {
+                dropdown.show([.caption("Rocket won't fill a password on an unencrypted page")],
+                              below: anchor, in: window)
+            } else {
+                hideDropdown()
+            }
+            return
         }
         // A vault this Mac cannot open has no accounts to offer, and saying so belongs
         // in the manager window, not over a login form.
@@ -692,10 +790,13 @@ final class PasswordAutofillController {
                 guard let nowURL = owner.webView.url, let nowHost = SiteMatcher.host(from: nowURL),
                       SiteMatcher.matches(entryHost: entry.host, pageHost: nowHost) else { return }
                 secret.withString { password in
+                    // Never submits: this is the fallback for pages where detection
+                    // found nothing, so it fills the first login form on the page —
+                    // one the user has not pointed at and cannot see Rocket choosing.
                     owner.webView.callAsyncJavaScript(
                         "return window.__rocketPasswords ? window.__rocketPasswords.fillActive(username, password, submit) : false;",
                         arguments: ["username": entry.username, "password": password,
-                                    "submit": PasswordFlows.submitsAfterFill],
+                                    "submit": false],
                         in: nil, in: PasswordAutofill.world) { _ in }
                 }
                 self?.markUsedIfRecorded(entry.id)

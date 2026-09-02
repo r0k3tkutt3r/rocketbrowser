@@ -170,16 +170,26 @@ enum PasswordExport {
         var lines = [header]
         for entry in entries {
             let secret = secrets[entry.id]
-            lines.append([
-                entry.title ?? SiteMatcher.displayHost(entry.host),
-                entry.url ?? "https://\(entry.host)",
-                entry.username,
-                secret?.password ?? "",
-                secret?.notes ?? "",
-                secret?.otpAuth ?? "",
-            ].map(escape).joined(separator: ","))
+            // Only the descriptive columns are defused: a spreadsheet treats a leading
+            // =, +, - or @ as a formula, and a title or note can come from a site or an
+            // imported file. Usernames and passwords are left byte-exact, because a
+            // credential that survives the round trip matters more than a spreadsheet
+            // someone opened this file in by mistake.
+            let fields = [defuse(entry.title ?? SiteMatcher.displayHost(entry.host)),
+                          defuse(entry.url ?? "https://\(entry.host)"),
+                          entry.username,
+                          secret?.password ?? "",
+                          defuse(secret?.notes ?? ""),
+                          defuse(secret?.otpAuth ?? "")]
+            lines.append(fields.map(escape).joined(separator: ","))
         }
         return lines.joined(separator: "\n") + "\n"
+    }
+
+    /// Neutralises spreadsheet formula injection without changing what the text says.
+    static func defuse(_ field: String) -> String {
+        guard let first = field.first, "=+-@\t\r".contains(first) else { return field }
+        return "'" + field
     }
 
     static func escape(_ field: String) -> String {

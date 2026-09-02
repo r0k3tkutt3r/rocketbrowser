@@ -69,6 +69,10 @@ and unreadable on any other Mac; the reasoning is that your history file already
 records every site you visit. Passwords, notes and one-time-code seeds are never
 readable without authenticating.
 
+Passwords are never filled on an unencrypted `http://` page — the credential would
+cross the network readable by anyone on the path, so Rocket declines and says so.
+Loopback addresses like `localhost:3000` are exempt, since there is no network hop.
+
 **What the web page can see:** nothing. The detection script runs in an isolated
 JavaScript world that pages cannot see into or call, the account list is drawn in a
 native macOS panel rather than in the page, nothing is ever filled without your click,

@@ -115,6 +115,9 @@ enum PasswordFlows {
         alert.informativeText = """
         Write this key down and keep it somewhere safe. Rocket cannot show it again. It is \
         the only way to open your passwords on another Mac or after this Mac is erased.
+
+        Anyone who has this key can read your passwords without Touch ID, so treat it \
+        like the passwords themselves. Copying puts it on the clipboard for two minutes.
         """
         let accessory = RecoveryKeyAccessoryView(key: key)
         alert.accessoryView = accessory
@@ -309,8 +312,11 @@ final class RecoveryKeyAccessoryView: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
     @objc private func copyKey() {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(key, forType: .string)
+        // This key opens the whole vault on any Mac — copying it is closer to exporting
+        // the master key than to copying a password, so it gets the same concealed,
+        // self-clearing treatment, with a longer window because it has to be pasted
+        // somewhere durable.
+        PasswordClipboard.copy(key, clearAfter: 120)
     }
 
     @objc private func toggled() {

@@ -4,6 +4,9 @@ import LocalAuthentication
 
 extension Notification.Name {
     static let passwordsDidChange = Notification.Name("rocket.passwordsDidChange")
+    /// Posted whenever the vault key is dropped. Anything showing decrypted text has to
+    /// clear it: wiping the key achieves nothing while the password is still on screen.
+    static let passwordsDidLock = Notification.Name("rocket.passwordsDidLock")
 }
 
 // MARK: - Authentication
@@ -297,6 +300,7 @@ final class PasswordStore {
         lockTimer = nil
         cachedKey?.wipe()
         cachedKey = nil
+        NotificationCenter.default.post(name: .passwordsDidLock, object: self)
     }
 
     // MARK: Secrets

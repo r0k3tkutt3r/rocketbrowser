@@ -302,7 +302,10 @@ final class BrowserWindowController: NSWindowController {
         let menu = NSMenu()
         let store = PasswordStore.shared
         if let url = webView.url, !NewTabPage.isInternalURL(url), let host = SiteMatcher.host(from: url) {
-            let accounts = store.needsRestore ? [] : store.entries(for: host)
+            // Same rule as the in-page panel: no password crosses an unencrypted
+            // connection, whichever way the user reached for it.
+            let accounts = (store.needsRestore || !PasswordAutofillController.allowsFilling(on: url, host: host))
+                ? [] : store.entries(for: host)
             if accounts.isEmpty {
                 let empty = menu.addItem(withTitle: "No Saved Passwords for \(SiteMatcher.displayHost(host))",
                                          action: nil, keyEquivalent: "")

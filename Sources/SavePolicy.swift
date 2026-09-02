@@ -20,7 +20,10 @@ enum SavePolicy {
         // Rocket put it there, so there is nothing new to record — true whether the
         // entry was saved under this exact host or a sibling one it was offered on.
         if filledByRocket, existing.contains(where: {
-            SiteMatcher.matches(entryHost: $0.host, pageHost: host) && $0.username == username
+            guard SiteMatcher.matches(entryHost: $0.host, pageHost: host) else { return false }
+            // A form with no username box reports an empty one, which would otherwise
+            // miss the entry Rocket just filled from and offer to save a duplicate.
+            return $0.username == username || username.isEmpty
         }) {
             return .ignore
         }

@@ -44,6 +44,28 @@ enum SiteMatcher {
         // Dynamic DNS
         "duckdns.org", "no-ip.org", "no-ip.com", "ddns.net", "dynu.net", "hopto.org",
         "zapto.org", "sytes.net", "serveblog.net", "myftp.org", "onthewifi.com",
+        // Cloud and CDN edges — cloudfront.net in particular is an official public
+        // suffix and was missing, which is exactly the failure mode this list exists
+        // to prevent.
+        "cloudfront.net", "elasticbeanstalk.com", "elb.amazonaws.com", "awsapprunner.com",
+        "amplifyapp.com", "lambda-url.on.aws", "execute-api.amazonaws.com",
+        "azurestaticapps.net", "azureedge.net", "trafficmanager.net", "azurecontainer.io",
+        "run.app", "a.run.app", "appspot.com", "firebaseio.com", "web.val.run",
+        "cdn.prod.website-files.com", "pantheonsite.io", "platformsh.site", "scalingo.io",
+        "cleverapps.io", "bhs.io", "eu.pythonanywhere.com", "pythonanywhere.com",
+        "readthedocs.io", "rtfd.io", "hasura.app", "supabase.co", "up.railway.app",
+        "ondigitalocean.app", "oraclecloud.com", "herokudns.com", "hf.space",
+        "modal.run", "stackhero-network.com", "githubusercontent.com",
+        // More SaaS tenants and site builders
+        "shopifypreview.com", "myasustor.com", "sharepoint.com", "onmicrosoft.com",
+        "salesforce.com", "force.com", "visualforce.com", "lightning.force.com",
+        "my.salesforce.com", "servicenow.com", "zohosites.com", "zoho.com",
+        "hubspotpagebuilder.com", "kinsta.cloud", "wpengine.com", "wpcomstaging.com",
+        "ghost.io", "cargo.site", "carrd.co", "durable.co", "strikingly.com",
+        "bubbleapps.io", "softr.app", "retool.com", "airtableblocks.com", "typeform.com",
+        "discourse.group", "discoursehosting.net", "helpscoutdocs.com", "intercom-mail.com",
+        "canny.io", "frill.co", "productboard.com", "gitea.io", "sourceforge.io",
+        "bitbucket.io", "codeberg.page", "srht.site", "js.org", "now.sh",
         // Public second levels the two-letter rule misses
         "me.uk", "eu.org", "uk.com", "us.com", "za.com", "de.com", "br.com", "cn.com",
         "sa.com", "se.net", "gb.net", "hu.net", "jp.net", "ru.com", "org.uk", "ltd.uk",
@@ -113,6 +135,14 @@ enum SiteMatcher {
     private static func stripWWW(_ host: String) -> String {
         let lower = host.lowercased()
         return lower.hasPrefix("www.") ? String(lower.dropFirst(4)) : lower
+    }
+
+    /// Loopback, where "unencrypted" carries no network risk. `localhost:3000` and
+    /// friends are the one place autofill still works over plain http.
+    static func isLoopback(_ host: String) -> Bool {
+        let bare = host.split(separator: ":").first.map(String.init)?.lowercased() ?? host
+        return bare == "localhost" || bare == "127.0.0.1" || bare == "::1" || bare == "[::1]"
+            || bare.hasSuffix(".localhost")
     }
 
     private static func isIPAddress(_ host: String) -> Bool {

@@ -6,15 +6,22 @@ enum PasswordClipboard {
     static let concealed = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
 
     static func copy(_ secret: SecureString) {
+        secret.withString { copy($0) }
+    }
+
+    /// Marks the pasteboard concealed so clipboard managers skip it, and takes it back
+    /// after a minute. The marker is advisory — any process can still read the
+    /// clipboard while it is there — so this shortens exposure, it does not remove it.
+    static func copy(_ text: String, clearAfter seconds: TimeInterval = 60) {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        _ = secret.withString { pasteboard.setString($0, forType: .string) }
+        pasteboard.setString(text, forType: .string)
         pasteboard.setString("", forType: concealed)
         // Captured per copy rather than held in a shared property: with one static,
         // copying a second password inside the minute made the first copy's timer
         // clear the second one early.
         let ours = pasteboard.changeCount
-        DispatchQueue.main.asyncAfter(deadline: .now() + 60) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
             // Only if nothing else has taken the pasteboard since — clearing someone
             // else's clipboard would be worse than leaving ours.
             if pasteboard.changeCount == ours { pasteboard.clearContents() }
@@ -189,6 +196,15 @@ final class PasswordDetailView: NSView, NSTextFieldDelegate {
         otpLabel.stringValue = secret.otpAuth ?? ""
     }
 
+    /// Everything this pane decrypted, off the screen. The password's own 30-second
+    /// timer never covered the notes or the one-time-code seed, which sat there until
+    /// the window closed — including after the vault had locked.
+    func clearSecrets() {
+        hideRevealed()
+        notesView.string = ""
+        otpLabel.stringValue = ""
+    }
+
     func beginNew(host: String? = nil) {
         show(PasswordEntry(host: host ?? "", url: host.map { "https://\($0)" }, username: ""))
         isNew = true
@@ -293,6 +309,7 @@ final class PasswordsWindowController: NSWindowController, NSTableViewDataSource
     private let exportButton = NSButton(title: "Export…", target: nil, action: nil)
     private var filtered: [PasswordEntry] = []
     private var observer: NSObjectProtocol?
+    private var lockObservers: [NSObjectProtocol] = []
 
     private init() {
         let window = NSWindow(
@@ -324,6 +341,19 @@ final class PasswordsWindowController: NSWindowController, NSTableViewDataSource
         observer = observer ?? NotificationCenter.default.addObserver(
             forName: .passwordsDidChange, object: nil, queue: .main
         ) { [weak self] _ in self?.reload() }
+        // Locking the vault has to take the decrypted text off the screen too, and
+        // stepping away from Rocket is the moment someone else could read it.
+        if lockObservers.isEmpty {
+            lockObservers = [
+                NotificationCenter.default.addObserver(forName: .passwordsDidLock, object: nil, queue: .main) {
+                    [weak self] _ in self?.detail.clearSecrets()
+                },
+                NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification,
+                                                       object: nil, queue: .main) {
+                    [weak self] _ in self?.detail.clearSecrets()
+                },
+            ]
+        }
     }
 
     private func buildContent() {
@@ -603,7 +633,7 @@ final class PasswordsWindowController: NSWindowController, NSTableViewDataSource
 
 extension PasswordsWindowController: NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
-        detail.hideRevealed()
+        detail.clearSecrets()
         detail.show(nil)
         tableView.deselectAll(nil)
         if let observer {
