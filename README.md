@@ -107,9 +107,11 @@ there is no public API for it through macOS 26/27. Importing the CSV is the way 
 ## Distributing a build
 
 ```bash
-./build.sh --universal              # both architectures; a native build won't run on Intel
-./build.sh --universal --notarize   # Developer ID signature + Apple notarization + staple
+./build.sh              # Developer ID signature + hardened runtime
+./build.sh --notarize   # submit to Apple, staple the ticket, verify with spctl
 ```
+
+Builds are Apple Silicon only — an Intel Mac cannot run them.
 
 Notarization needs credentials stored once:
 

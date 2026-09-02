@@ -7,12 +7,10 @@ APP_NAME="Rocket"
 APP="build/$APP_NAME.app"
 ARCH="$(uname -m)"
 
-# ./build.sh [--universal] [--install | --notarize]
-UNIVERSAL=0
+# ./build.sh [--install | --notarize]
 ACTION=""
 for arg in "$@"; do
     case "$arg" in
-        --universal)          UNIVERSAL=1 ;;
         --install|--notarize) ACTION="$arg" ;;
         *) echo "unknown option: $arg" >&2; exit 1 ;;
     esac
@@ -21,33 +19,20 @@ done
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-# A plain build targets this Mac only, which keeps it a few seconds. Anything you hand
-# to someone else wants --universal: a native arm64 binary simply will not launch on an
-# Intel Mac, and the failure gives the user nothing to go on.
-if [[ "$UNIVERSAL" == "1" ]]; then
-    SLICES="$(mktemp -d)"
-    trap 'rm -rf "$SLICES"' EXIT
-    for slice_arch in arm64 x86_64; do
-        xcrun -sdk macosx swiftc \
-            -O -swift-version 5 \
-            -target "$slice_arch-apple-macos14.0" \
-            Sources/*.swift \
-            -o "$SLICES/$slice_arch"
-    done
-    lipo -create "$SLICES/arm64" "$SLICES/x86_64" -output "$APP/Contents/MacOS/$APP_NAME"
-else
-    xcrun -sdk macosx swiftc \
-        -O -swift-version 5 \
-        -target "$ARCH-apple-macos14.0" \
-        Sources/*.swift \
-        -o "$APP/Contents/MacOS/$APP_NAME"
-fi
+# Native only, by choice: Rocket targets Apple Silicon. An Intel Mac cannot run this
+# build at all (it would need a second slice and `lipo`), which is worth knowing before
+# handing the app to someone.
+xcrun -sdk macosx swiftc \
+    -O -swift-version 5 \
+    -target "$ARCH-apple-macos14.0" \
+    Sources/*.swift \
+    -o "$APP/Contents/MacOS/$APP_NAME"
 
 # App icon: rendered from code (Tools/AppIcon.swift) into an .iconset, then packed
 # into Rocket.icns. Finder, Launchpad and ⌘-Tab read this file from the bundle —
 # a runtime NSApp.applicationIconImage only ever affects the live Dock tile.
 STAGING="$(mktemp -d)"
-trap 'rm -rf "$STAGING" "${SLICES:-}"' EXIT
+trap 'rm -rf "$STAGING"' EXIT
 xcrun -sdk macosx swiftc \
     -O -swift-version 5 \
     -target "$ARCH-apple-macos14.0" \
@@ -132,10 +117,6 @@ elif [[ "$ACTION" == "--notarize" ]]; then
         echo "error: notarization needs a Developer ID signature; none was used." >&2
         exit 1
     fi
-    if [[ "$UNIVERSAL" != "1" ]]; then
-        echo "warning: this build is $ARCH only. Anyone on the other architecture cannot"
-        echo "         run it. Use: ./build.sh --universal --notarize"
-    fi
     ZIP="$(mktemp -d)/$APP_NAME.zip"
     ditto -c -k --keepParent "$APP" "$ZIP"
     xcrun notarytool submit "$ZIP" --keychain-profile "${ROCKET_NOTARY_PROFILE:-rocket-notary}" --wait
@@ -146,5 +127,5 @@ elif [[ "$ACTION" == "--notarize" ]]; then
 else
     echo "Run with: open $APP"
     echo "Install with: ./build.sh --install"
-    echo "For distribution: ./build.sh --universal && ./build.sh --universal --notarize"
+    echo "Notarize for distribution: ./build.sh --notarize"
 fi
