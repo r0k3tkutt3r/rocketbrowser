@@ -17,6 +17,14 @@ enum PasswordFlows {
         set { UserDefaults.standard.set(newValue, forKey: "PasswordsOfferToSave") }
     }
 
+    /// Sign in outright once a password has been filled, the way Safari does. Off is
+    /// worth having: a site with a "remember me" box, a CAPTCHA, or a sign-in button
+    /// that means something else is better left for the user to press.
+    static var submitsAfterFill: Bool {
+        get { UserDefaults.standard.object(forKey: "PasswordsSubmitAfterFill") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "PasswordsSubmitAfterFill") }
+    }
+
     /// 0 = every operation authenticates (the default).
     static var lockAfterSeconds: Int {
         get { UserDefaults.standard.object(forKey: "PasswordsLockAfter") as? Int ?? 0 }

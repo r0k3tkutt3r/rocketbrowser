@@ -35,8 +35,18 @@ Rocket has its own password manager: Chrome's workflow with Safari's lock.
 
 Sign in to a site and Rocket offers to save. Click a login field and a small native
 list of your accounts for that site drops down — pick one, confirm with Touch ID, and
-it fills. Sign-up forms offer a generated 20-character password. The key button in the
-toolbar does the same job on pages where field detection comes up empty.
+it fills **and signs you straight in**, the way Safari does. Sign-up forms offer a
+generated 20-character password instead, and are never submitted for you, since you
+still have the rest of the form to fill in. The key button in the toolbar does the same
+job on pages where field detection comes up empty.
+
+Signing in for you means finding the right control, not just pressing Return: Rocket
+prefers the form's real submit button, will accept one labelled like signing in, and
+refuses ones that read like "Forgot password", "Show", or "Create account" — falling
+back to submitting the form itself, and finally to a Return keypress for single-page
+logins that have no form element. If a site does something it doesn't like — a CAPTCHA,
+a "remember me" box you want to tick first — turn off Tools → Passwords → **Sign In
+After Filling** and it will fill only.
 
 **How it's protected.** Everything lives in `passwords.vault`, encrypted with
 AES-256-GCM. The key that opens your passwords is wrapped by a Secure Enclave key

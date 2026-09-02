@@ -251,12 +251,78 @@ enum PasswordAutofill {
             el.dispatchEvent(new Event('change', { bubbles: true }));
             touched.add(el);
         }
-        function fill(fieldID, username, password) {
+        // --- submitting after a fill ----------------------------------------------
+        // Safari signs you in outright once Touch ID succeeds; this is the same idea.
+        // Never called for a generated password on a sign-up form, where the person
+        // still has other boxes to fill in.
+        var submitWords = /log ?in|log ?on|sign ?in|sign ?on|submit|continue|next|proceed|enter|go|done|confirm/i;
+        var notSubmitWords = /forgot|reset|cancel|back|show|hide|reveal|toggle|sign ?up|register|create|new account|help|support|privacy|terms|remember/i;
+
+        function findSubmitButton(scope, record) {
+            var candidates = scope.querySelectorAll(
+                'button, input[type=submit], input[type=image], input[type=button], [role=button]');
+            var best = null;
+            for (var i = 0; i < candidates.length; i++) {
+                var el = candidates[i];
+                if (!isVisible(el) || el.disabled) { continue; }
+                var label = ((el.textContent || '') + ' ' + (el.getAttribute('aria-label') || '')
+                    + ' ' + (el.value || '') + ' ' + (el.getAttribute('title') || '')).trim();
+                if (notSubmitWords.test(label)) { continue; }
+                var type = (el.getAttribute('type') || '').toLowerCase();
+                // A real submit control wins outright.
+                if (type === 'submit' || type === 'image' || (el.tagName === 'BUTTON' && !type)) {
+                    if (!record.form || el.form === record.form || record.form.contains(el)) { return el; }
+                }
+                if (!best && submitWords.test(label)) { best = el; }
+            }
+            return best;
+        }
+
+        // What a person does: Return in the password box. Frameworks listen for this,
+        // and legacy handlers still read keyCode, which the constructor cannot set.
+        function pressEnter(el) {
+            if (!el) { return false; }
+            try { el.focus(); } catch (e) {}
+            ['keydown', 'keypress', 'keyup'].forEach(function (type) {
+                var event = new KeyboardEvent(type, { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true });
+                try {
+                    Object.defineProperty(event, 'keyCode', { get: function () { return 13; } });
+                    Object.defineProperty(event, 'which', { get: function () { return 13; } });
+                } catch (e) {}
+                el.dispatchEvent(event);
+            });
+            return true;
+        }
+
+        function submitLogin(record, field) {
+            var scope = scopeOf(record);
+            var button = findSubmitButton(scope, record);
+            // Clicking the real control is the most compatible route: it runs the
+            // page's own click handlers and sends the button's name/value with the form.
+            if (button) { button.click(); return true; }
+            if (record.form) {
+                if (typeof record.form.requestSubmit === 'function') {
+                    try { record.form.requestSubmit(); return true; } catch (e) {}
+                }
+                try { record.form.submit(); return true; } catch (e) {}
+            }
+            return pressEnter(field || record.password);
+        }
+
+        function fill(fieldID, username, password, submit) {
             var el = elements[fieldID];
             var info = classify(el);
             if (!info) { return false; }
             if (info.usernameOnly) {
                 if (username != null) { setValue(el, username); }
+                // The username-only step of a two-page sign-in: submitting is what
+                // moves it on to the password screen.
+                if (submit) {
+                    setTimeout(function () {
+                        var again = classify(el);
+                        if (again && again.usernameOnly) { submitLogin({ form: el.form, password: el, username: el }, el); }
+                    }, 150);
+                }
                 return true;
             }
             var record = info.record;
@@ -265,14 +331,19 @@ enum PasswordAutofill {
                 record.passwords.forEach(function (p) { setValue(p, password); filledByRocket.set(p, password); });
             }
             try { el.focus(); } catch (e) {}
+            if (submit && !record.isSignUp) {
+                // A beat first, so a framework has processed the input events and its
+                // sign-in button is no longer disabled by its own validation.
+                setTimeout(function () { submitLogin(record, el); }, 150);
+            }
             return true;
         }
-        function fillActive(username, password) {
+        function fillActive(username, password, submit) {
             var el = focused ? focused.el : document.activeElement;
-            if (classify(el)) { return fill(idFor(el), username, password); }
+            if (classify(el)) { return fill(idFor(el), username, password, submit); }
             var records = analyze();
             if (!records.length) { return false; }
-            return fill(idFor(records[0].password), username, password);
+            return fill(idFor(records[0].password), username, password, submit);
         }
         function setPanelState(state) {
             panel.visible = !!state.visible;
@@ -549,7 +620,8 @@ final class PasswordAutofillController {
         case .account(let entry, _):
             // A username-only step needs no secret, so it needs no authentication.
             if focused.usernameOnly {
-                fill(fieldID: focused.id, username: entry.username, password: nil, in: focused.frame)
+                fill(fieldID: focused.id, username: entry.username, password: nil,
+                     submit: PasswordFlows.submitsAfterFill, in: focused.frame)
                 markUsedIfRecorded(entry.id)
                 return
             }
@@ -570,13 +642,16 @@ final class PasswordAutofillController {
                           let nowHost = SiteMatcher.host(from: nowURL),
                           SiteMatcher.matches(entryHost: entry.host, pageHost: nowHost) else { return }
                     secret.withString {
-                        self.fill(fieldID: focused.id, username: entry.username, password: $0, in: focused.frame)
+                        self.fill(fieldID: focused.id, username: entry.username, password: $0,
+                                  submit: PasswordFlows.submitsAfterFill, in: focused.frame)
                     }
                     self.markUsedIfRecorded(entry.id)
                 }
             }
         case .strongPassword:
-            fill(fieldID: focused.id, username: nil, password: PasswordGenerator.make(), in: focused.frame)
+            // Never submitted: a sign-up form still needs the rest of its boxes.
+            fill(fieldID: focused.id, username: nil, password: PasswordGenerator.make(),
+                 submit: false, in: focused.frame)
         case .manage:
             PasswordsWindowController.shared.show()
         case .caption:
@@ -592,10 +667,12 @@ final class PasswordAutofillController {
     }
 
     /// The password rides as an argument, never spliced into JavaScript source.
-    private func fill(fieldID: Int, username: String?, password: String?, in frame: WKFrameInfo?) {
+    private func fill(fieldID: Int, username: String?, password: String?,
+                      submit: Bool, in frame: WKFrameInfo?) {
         owner?.webView.callAsyncJavaScript(
-            "return window.__rocketPasswords ? window.__rocketPasswords.fill(fieldID, username, password) : false;",
-            arguments: ["fieldID": fieldID, "username": username ?? NSNull(), "password": password ?? NSNull()],
+            "return window.__rocketPasswords ? window.__rocketPasswords.fill(fieldID, username, password, submit) : false;",
+            arguments: ["fieldID": fieldID, "username": username ?? NSNull(),
+                        "password": password ?? NSNull(), "submit": submit],
             in: frame, in: PasswordAutofill.world) { _ in }
     }
 
@@ -616,8 +693,9 @@ final class PasswordAutofillController {
                       SiteMatcher.matches(entryHost: entry.host, pageHost: nowHost) else { return }
                 secret.withString { password in
                     owner.webView.callAsyncJavaScript(
-                        "return window.__rocketPasswords ? window.__rocketPasswords.fillActive(username, password) : false;",
-                        arguments: ["username": entry.username, "password": password],
+                        "return window.__rocketPasswords ? window.__rocketPasswords.fillActive(username, password, submit) : false;",
+                        arguments: ["username": entry.username, "password": password,
+                                    "submit": PasswordFlows.submitsAfterFill],
                         in: nil, in: PasswordAutofill.world) { _ in }
                 }
                 self?.markUsedIfRecorded(entry.id)

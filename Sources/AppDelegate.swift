@@ -271,6 +271,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         PasswordFlows.offersToSave.toggle()
     }
 
+    @objc func togglePasswordSubmit(_ sender: Any?) {
+        PasswordFlows.submitsAfterFill.toggle()
+    }
+
     @objc func setPasswordsLockAfter(_ sender: NSMenuItem) {
         PasswordFlows.lockAfterSeconds = sender.tag
     }
@@ -666,6 +670,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
                               action: #selector(togglePasswordAutofill(_:)), keyEquivalent: "")
         passwordsMenu.addItem(withTitle: "Offer to Save Passwords",
                               action: #selector(togglePasswordSaving(_:)), keyEquivalent: "")
+        passwordsMenu.addItem(withTitle: "Sign In After Filling",
+                              action: #selector(togglePasswordSubmit(_:)), keyEquivalent: "")
         let lockMenu = NSMenu(title: "Lock After")
         for choice in PasswordFlows.lockAfterChoices {
             let item = lockMenu.addItem(withTitle: choice.title,
@@ -1151,6 +1157,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         case #selector(togglePasswordSaving(_:)):
             menuItem.state = PasswordFlows.offersToSave ? .on : .off
             return true
+        case #selector(togglePasswordSubmit(_:)):
+            menuItem.state = PasswordFlows.submitsAfterFill ? .on : .off
+            return PasswordFlows.autofillEnabled
         case #selector(setPasswordsLockAfter(_:)):
             menuItem.state = menuItem.tag == PasswordFlows.lockAfterSeconds ? .on : .off
             return true
