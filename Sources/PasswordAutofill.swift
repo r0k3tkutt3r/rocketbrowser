@@ -680,19 +680,35 @@ final class PasswordAutofillController {
     /// the toolbar key button.
     private func screenRect(for field: FocusedField?) -> NSRect? {
         guard let owner, let window = owner.window else { return nil }
-        guard let field, let css = field.rect, let viewportWidth = field.viewportWidth, viewportWidth > 0 else {
+        let webView = owner.webView
+        // Every one of these has to hold for the measurement to mean anything. When one
+        // does not, the toolbar key button is a known-good anchor — far better than
+        // trusting a number and parking the panel in a corner of the screen.
+        guard let field, let css = field.rect, let viewportWidth = field.viewportWidth,
+              viewportWidth > 0, css.width > 0, css.height > 0,
+              webView.bounds.width > 1, webView.bounds.height > 1 else {
             return owner.passwordsAnchorScreenRect()
         }
-        let webView = owner.webView
+        // The page reports CSS pixels; this turns them into view points. A ratio far
+        // from 1 means the page and the view disagree about the viewport, and the
+        // result would not land anywhere near the field.
         let scale = webView.bounds.width / viewportWidth
+        guard scale > 0.2, scale < 5 else { return owner.passwordsAnchorScreenRect() }
         let scaled = NSRect(x: css.minX * scale, y: css.minY * scale,
                             width: css.width * scale, height: css.height * scale)
         // getBoundingClientRect measures from the top of the viewport; an unflipped
         // view measures from the bottom.
         let y = webView.isFlipped ? scaled.minY : webView.bounds.height - scaled.maxY
         let viewRect = NSRect(x: scaled.minX, y: y, width: scaled.width, height: scaled.height)
+        // Scrolled out of sight: no anchor at all rather than one clamped to an edge.
         guard webView.bounds.intersects(viewRect) else { return nil }
-        return window.convertToScreen(webView.convert(viewRect, to: nil))
+        let screenRect = window.convertToScreen(webView.convert(viewRect, to: nil))
+        // A rect on no screen at all means something upstream is wrong; fall back
+        // rather than hand the panel a position it cannot be seen at.
+        guard NSScreen.screens.contains(where: { $0.frame.intersects(screenRect) }) else {
+            return owner.passwordsAnchorScreenRect()
+        }
+        return screenRect
     }
 
     private func syncPanelState() {

@@ -110,6 +110,8 @@ final class PasswordDropdown {
     private var rows: [PasswordDropdownRow] = []
     private(set) var items: [PasswordDropdownItem] = []
     private(set) var selectedIndex: Int?
+    /// The last anchor used, so a re-show without a fresh measurement keeps its place.
+    private(set) var lastAnchor: NSRect = .zero
 
     var isVisible: Bool { panel.isVisible }
 
@@ -143,6 +145,31 @@ final class PasswordDropdown {
         panel.contentView = background
     }
 
+    /// Where the panel goes for a given anchor, kept inside `visible` (a screen's
+    /// visible frame). Pure so the placement rules are testable without a screen:
+    /// below the field normally, flipped above it when the field sits near the bottom,
+    /// and never past a left or right edge. A panel that hangs off the display is
+    /// unusable, so clamping is not cosmetic.
+    static func frame(width: CGFloat, height: CGFloat,
+                      below anchor: NSRect, within visible: NSRect) -> NSRect {
+        let margin: CGFloat = 4
+        let x = min(max(anchor.minX, visible.minX + margin), max(visible.maxX - width - margin, visible.minX + margin))
+        let below = anchor.minY - height - 3
+        let above = anchor.maxY + 3
+        var y = below
+        if below < visible.minY + margin {
+            // No room underneath: put it over the field instead.
+            y = (above + height <= visible.maxY - margin) ? above : visible.minY + margin
+        }
+        // Final clamp, because neither candidate is safe on its own: an anchor that is
+        // itself off the screen (a field scrolled past the edge, a stale rectangle)
+        // makes "below" and "above" both land outside it.
+        let lowest = visible.minY + margin
+        let highest = max(visible.maxY - height - margin, lowest)
+        y = min(max(y, lowest), highest)
+        return NSRect(x: x, y: y, width: width, height: height)
+    }
+
     /// `anchor` is a screen rectangle (the field, or the toolbar key button).
     func show(_ items: [PasswordDropdownItem], below anchor: NSRect, in window: NSWindow) {
         guard !items.isEmpty else { hide(); return }
@@ -161,15 +188,32 @@ final class PasswordDropdown {
 
         let width = min(max(anchor.width, 280), 440)
         let height = CGFloat(items.count) * 30 + 8
-        panel.setFrame(NSRect(x: anchor.minX, y: anchor.minY - height - 3, width: width, height: height),
+        lastAnchor = anchor
+        panel.setFrame(Self.frame(width: width, height: height, below: anchor,
+                                  within: Self.visibleFrame(for: anchor, window: window)),
                        display: true)
         if panel.parent == nil { window.addChildWindow(panel, ordered: .above) }
         panel.orderFront(nil)
     }
 
+    /// Follows the field as the page scrolls, under the same clamping as `show`.
     func move(to anchor: NSRect) {
         guard isVisible else { return }
-        panel.setFrameOrigin(NSPoint(x: anchor.minX, y: anchor.minY - panel.frame.height - 3))
+        lastAnchor = anchor
+        let visible = Self.visibleFrame(for: anchor, window: panel.parent)
+        panel.setFrame(Self.frame(width: panel.frame.width, height: panel.frame.height,
+                                  below: anchor, within: visible),
+                       display: true)
+    }
+
+    /// The visible area of whichever screen the anchor actually sits on — not simply
+    /// the main screen, which would be wrong the moment the window is on a second
+    /// display.
+    private static func visibleFrame(for anchor: NSRect, window: NSWindow?) -> NSRect {
+        let screen = NSScreen.screens.first { $0.frame.intersects(anchor) }
+            ?? window?.screen
+            ?? NSScreen.main
+        return screen?.visibleFrame ?? anchor
     }
 
     func hide() {
