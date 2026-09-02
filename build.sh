@@ -112,7 +112,8 @@ elif [[ "$ACTION" == "--notarize" ]]; then
     # One-time credential setup (stores an app-specific password in the keychain):
     #   xcrun notarytool store-credentials rocket-notary \
     #       --apple-id "<your Apple ID>" --team-id "$TEAM_ID" --password "<app-specific password>"
-    # App-specific passwords come from appleid.apple.com, not your normal password.
+    # The app-specific password is generated at account.apple.com under
+    # Sign-In and Security > App-Specific Passwords — it is not your Apple ID password.
     if [[ -z "$SIGN_ID" ]]; then
         echo "error: notarization needs a Developer ID signature; none was used." >&2
         exit 1

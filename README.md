@@ -119,7 +119,11 @@ Notarization needs credentials stored once:
 xcrun notarytool store-credentials rocket-notary --apple-id "you@example.com" --team-id "HWWPT38672" --password "<app-specific password>"
 ```
 
-The app-specific password comes from appleid.apple.com, not your Apple ID password.
+The app-specific password is generated, not chosen: sign in at
+[account.apple.com](https://account.apple.com) with the Apple ID on the developer team,
+go to **Sign-In and Security → App-Specific Passwords**, and create one. It looks like
+`abcd-efgh-ijkl-mnop` and is shown once. `store-credentials` puts it in the keychain
+under that profile name, so it is needed only the first time.
 Signing with Developer ID alone is not enough — since macOS 10.15 an un-notarized
 download is refused with "Apple cannot check it for malicious software". Stapling
 writes the ticket into the bundle so it also passes with no network.
