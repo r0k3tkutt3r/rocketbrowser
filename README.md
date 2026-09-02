@@ -63,8 +63,16 @@ readable without authenticating.
 JavaScript world that pages cannot see into or call, the account list is drawn in a
 native macOS panel rather than in the page, nothing is ever filled without your click,
 and a site is only offered credentials saved under its own registrable domain — so a
-look-alike domain gets nothing. The app is signed with the hardened runtime, which
-blocks other processes from injecting code into Rocket or attaching a debugger to it.
+look-alike domain gets nothing, and neither does a free account on a shared host like
+`attacker.github.io`. Synthetic events are ignored, so a page cannot fake the keystrokes
+that would drive the panel into filling itself.
+
+The app is signed with the hardened runtime, which stops other processes injecting code
+into Rocket or attaching a debugger to it. One honest caveat: the signature is ad-hoc,
+and re-signing ad-hoc takes no key, so malware that can already write to the app bundle
+could produce an unhardened copy. That is a real limit, and only a Developer ID
+signature with notarization would close it. The barrier your passwords actually rest on
+is the Secure Enclave gate, which no amount of re-signing gets past.
 
 **Import and export.** Tools → Passwords → Import from CSV… reads exports from Apple
 Passwords, Chrome/Google and Firefox, mapping the columns by name so you don't have to

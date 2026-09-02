@@ -199,7 +199,9 @@ enum PasswordAutofill {
             }
         }, true);
         // Clicking a field that already has focus brings the list back, like Chrome.
+        // Trusted only, so a page cannot use it to re-arm the panel on its own.
         document.addEventListener('mousedown', function (e) {
+            if (!e.isTrusted) { return; }
             if (focused && e.target === focused.el && !panel.visible) { reportFocus(e.target); }
         }, true);
         var moveTimer = null;
@@ -215,6 +217,12 @@ enum PasswordAutofill {
 
         // --- keys: only while the native panel is up, and only the keys it owns -----
         document.addEventListener('keydown', function (e) {
+            // Synthetic events are the whole attack: DOM events reach listeners in
+            // every world, so without this a page could dispatch ArrowDown + Enter at
+            // a focused password field and drive the native panel into filling itself,
+            // with no user interaction at all. `isTrusted` is read through this world's
+            // own Event prototype, so a page cannot forge it.
+            if (!e.isTrusted) { return; }
             if (!focused || e.target !== focused.el) { return; }
             var picking = panel.visible && panel.hasSelection;
             // Return with nothing selected is the user submitting the form.
@@ -542,7 +550,7 @@ final class PasswordAutofillController {
             // A username-only step needs no secret, so it needs no authentication.
             if focused.usernameOnly {
                 fill(fieldID: focused.id, username: entry.username, password: nil, in: focused.frame)
-                PasswordStore.shared.markUsed(id: entry.id)
+                markUsedIfRecorded(entry.id)
                 return
             }
             let reason = "fill your password for \(SiteMatcher.displayHost(entry.host))"
@@ -552,11 +560,19 @@ final class PasswordAutofillController {
                 case .failure(let error):
                     PasswordFlows.present(error, in: owner.window)
                 case .success(let secret):
+                    defer { secret.wipe() }
+                    // Authentication takes seconds, and the page is free to navigate
+                    // during them. Without re-checking, a page could offer a login
+                    // form, wait for the Touch ID sheet, and swap itself for another
+                    // document that receives the password instead.
+                    guard self.focused?.id == focused.id,
+                          let nowURL = owner.webView.url,
+                          let nowHost = SiteMatcher.host(from: nowURL),
+                          SiteMatcher.matches(entryHost: entry.host, pageHost: nowHost) else { return }
                     secret.withString {
                         self.fill(fieldID: focused.id, username: entry.username, password: $0, in: focused.frame)
                     }
-                    secret.wipe()
-                    PasswordStore.shared.markUsed(id: entry.id)
+                    self.markUsedIfRecorded(entry.id)
                 }
             }
         case .strongPassword:
@@ -566,6 +582,13 @@ final class PasswordAutofillController {
         case .caption:
             break
         }
+    }
+
+    /// "Last used" is a persistent trace of what you opened and when. An incognito tab
+    /// may fill from the vault, but it must not leave that behind.
+    private func markUsedIfRecorded(_ id: UUID) {
+        guard owner?.isPrivate == false else { return }
+        PasswordStore.shared.markUsed(id: id)
     }
 
     /// The password rides as an argument, never spliced into JavaScript source.
@@ -581,19 +604,23 @@ final class PasswordAutofillController {
     func fillFromToolbar(entryID: UUID) {
         guard let owner, let entry = PasswordStore.shared.entry(id: entryID) else { return }
         let reason = "fill your password for \(SiteMatcher.displayHost(entry.host))"
-        PasswordStore.shared.password(for: entry.id, reason: reason) { result in
+        PasswordStore.shared.password(for: entry.id, reason: reason) { [weak self] result in
             switch result {
             case .failure(let error):
                 PasswordFlows.present(error, in: owner.window)
             case .success(let secret):
+                defer { secret.wipe() }
+                // The page can navigate while the authentication sheet is up; the
+                // credential must not follow it to a different site.
+                guard let nowURL = owner.webView.url, let nowHost = SiteMatcher.host(from: nowURL),
+                      SiteMatcher.matches(entryHost: entry.host, pageHost: nowHost) else { return }
                 secret.withString { password in
                     owner.webView.callAsyncJavaScript(
                         "return window.__rocketPasswords ? window.__rocketPasswords.fillActive(username, password) : false;",
                         arguments: ["username": entry.username, "password": password],
                         in: nil, in: PasswordAutofill.world) { _ in }
                 }
-                secret.wipe()
-                PasswordStore.shared.markUsed(id: entry.id)
+                self?.markUsedIfRecorded(entry.id)
             }
         }
     }
@@ -613,8 +640,16 @@ final class PasswordAutofillController {
            Date().timeIntervalSince(last.at) < Self.usernameCarryOver {
             username = last.username
         }
+        // The page supplies this string and the manager later shows it as the site and
+        // opens it, so a mismatched host would let a page label its entry "apple.com".
+        // Anything that does not resolve back to this page's host is discarded.
+        var submittedURL = body["url"] as? String
+        if let candidate = submittedURL,
+           URL(string: candidate).flatMap({ SiteMatcher.host(from: $0) }) != pageHost {
+            submittedURL = nil
+        }
         pendingCredential?.password.wipe()
-        pendingCredential = PendingCredential(host: pageHost, url: body["url"] as? String,
+        pendingCredential = PendingCredential(host: pageHost, url: submittedURL,
                                               username: username, password: SecureString(password),
                                               capturedAt: Date(),
                                               filledByRocket: body["filledByRocket"] as? Bool ?? false,

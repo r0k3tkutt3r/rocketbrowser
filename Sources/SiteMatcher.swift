@@ -2,14 +2,52 @@ import Foundation
 
 /// Which saved accounts belong to which page. A saved `accounts.google.com` login is
 /// offered on `mail.google.com` (same registrable domain), never on
-/// `google.com.evil.io`. Deliberately not a full public-suffix list: the two-label
-/// rule plus the common `co.uk`-style second levels covers real logins, and a
-/// mistake here only hides an account, it never leaks one to a stranger domain.
+/// `google.com.evil.io`.
+///
+/// Deliberately not the full Public Suffix List, but the shortcut has a sharp edge
+/// worth stating: getting this too NARROW only hides an account, while getting it too
+/// BROAD hands one site's password to another. The plain "last two labels" rule is too
+/// broad for every multi-label public suffix — it collapses `victim.github.io` and
+/// `attacker.github.io` onto `github.io`, and anyone can register the second one for
+/// free. `sharedSuffixes` below is therefore a curated list of hosting suffixes where
+/// separate registrants live under a common tail, maintained the same way
+/// `ContentBlocker`'s blocklists are. Adding to it is always safe; leaving one out is
+/// what costs a password.
 enum SiteMatcher {
 
     /// Second-level labels that are themselves public suffixes under a two-letter TLD.
     private static let secondLevelSuffixes: Set<String> = [
         "co", "com", "net", "org", "gov", "edu", "ac", "or", "ne", "go", "gob", "mil",
+    ]
+
+    /// Suffixes under which unrelated people get their own subdomain. A host ending in
+    /// one of these keeps one more label than the default rule would give it.
+    private static let sharedSuffixes: Set<String> = [
+        // Code and static hosting
+        "github.io", "gitlab.io", "pages.dev", "workers.dev", "vercel.app",
+        "netlify.app", "netlify.com", "herokuapp.com", "herokussl.com", "appspot.com",
+        "web.app", "firebaseapp.com", "cloudfunctions.net", "azurewebsites.net",
+        "cloudapp.net", "cloudapp.azure.com", "onrender.com", "fly.dev", "railway.app",
+        "koyeb.app", "deno.dev", "surge.sh", "neocities.org", "glitch.me", "repl.co",
+        "replit.dev", "codesandbox.io", "stackblitz.io", "gitbook.io",
+        // Storage and CDN buckets
+        "s3.amazonaws.com", "r2.dev", "blob.core.windows.net", "storage.googleapis.com",
+        "digitaloceanspaces.com", "backblazeb2.com",
+        // Blogging, shops, SaaS tenants
+        "blogspot.com", "wordpress.com", "tumblr.com", "medium.com", "substack.com",
+        "myshopify.com", "bigcartel.com", "squarespace.com", "wixsite.com",
+        "weebly.com", "webflow.io", "zendesk.com", "freshdesk.com", "statuspage.io",
+        "atlassian.net", "myjetbrains.com", "notion.site", "framer.website",
+        // Tunnels and previews, which attackers reach for first
+        "ngrok.io", "ngrok-free.app", "ngrok.app", "trycloudflare.com", "loca.lt",
+        "serveo.net", "localtunnel.me", "githubpreview.dev", "gitpod.io",
+        // Dynamic DNS
+        "duckdns.org", "no-ip.org", "no-ip.com", "ddns.net", "dynu.net", "hopto.org",
+        "zapto.org", "sytes.net", "serveblog.net", "myftp.org", "onthewifi.com",
+        // Public second levels the two-letter rule misses
+        "me.uk", "eu.org", "uk.com", "us.com", "za.com", "de.com", "br.com", "cn.com",
+        "sa.com", "se.net", "gb.net", "hu.net", "jp.net", "ru.com", "org.uk", "ltd.uk",
+        "plc.uk", "nhs.uk", "sch.uk", "web.id", "or.id", "my.id", "co.nl",
     ]
 
     /// Lowercased host with the port kept when it is not the scheme's default.
@@ -28,6 +66,17 @@ enum SiteMatcher {
         if bare.contains(":") || isIPAddress(bare) || !bare.contains(".") { return bare }
         let labels = bare.split(separator: ".").map(String.init)
         guard labels.count > 2 else { return bare }
+
+        // A shared hosting suffix is checked first and longest-first, so
+        // `a.s3.amazonaws.com` keeps three labels rather than being cut to
+        // `amazonaws.com` alongside every other bucket.
+        for tailLength in stride(from: min(labels.count - 1, 4), through: 2, by: -1) {
+            let tail = labels.suffix(tailLength).joined(separator: ".")
+            if sharedSuffixes.contains(tail) {
+                return labels.suffix(tailLength + 1).joined(separator: ".")
+            }
+        }
+
         let tld = labels[labels.count - 1]
         let second = labels[labels.count - 2]
         if tld.count == 2, secondLevelSuffixes.contains(second) {

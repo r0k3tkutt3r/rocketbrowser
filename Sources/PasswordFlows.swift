@@ -241,16 +241,25 @@ enum PasswordFlows {
             panel.nameFieldStringValue = "Rocket Passwords.csv"
             let handler: (NSApplication.ModalResponse) -> Void = { response in
                 guard response == .OK, let url = panel.url else { return }
-                store.withSecrets(reason: "export your passwords", { secrets in
-                    PasswordExport.csv(entries: store.entries, secrets: secrets)
+                // Built from the index the store hands in, not from `store.entries`:
+                // this closure runs on the store's crypto queue, and that property is
+                // main-thread-only.
+                store.mutate(reason: "export your passwords", { index, secrets in
+                    PasswordExport.csv(entries: index.entries, secrets: secrets)
                 }, completion: { result in
                     switch result {
                     case .failure(let error): present(error, in: window)
                     case .success(let csv):
-                        do {
-                            try csv.data(using: .utf8)!.write(to: url, options: .atomic)
-                            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-                        } catch { present(.io(error), in: window) }
+                        // Created at 0600 rather than written and then chmod'ed: an
+                        // atomic write lands at the default 0644 and only narrows
+                        // afterwards, and this file holds every password in clear text.
+                        // The gap is small but it is on the user's Desktop, possibly
+                        // inside a synced folder.
+                        guard let data = csv.data(using: .utf8) else { return }
+                        if !FileManager.default.createFile(atPath: url.path, contents: data,
+                                                           attributes: [.posixPermissions: 0o600]) {
+                            present(.io(CocoaError(.fileWriteNoPermission)), in: window)
+                        }
                     }
                 })
             }

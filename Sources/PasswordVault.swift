@@ -124,15 +124,27 @@ enum RecoveryKey {
         return grouped
     }
 
-    /// Accepts any case, any separators, and the usual paper confusions.
+    /// Accepts any case, any separators, and the usual paper confusions. The separator
+    /// set is generous on purpose: a key copied out of a document arrives with the
+    /// dashes a word processor substituted and whatever line endings it used, and
+    /// rejecting that reads to the user as "your recovery key is wrong".
     static func normalize(_ text: String) -> [UInt8]? {
+        // Scalars, not Characters: "\r\n" is a single grapheme cluster, so a key pasted
+        // with Windows line endings would match neither "\r" nor "\n" on its own.
+        let separators: Set<Unicode.Scalar> = [
+            "-", " ", "\n", "\r", "\t", ".", "_", "/", "|", ",",
+            "\u{00A0}",                                     // non-breaking space
+            "\u{2010}", "\u{2011}", "\u{2012}", "\u{2013}", // hyphen, non-breaking, figure, en dash
+            "\u{2014}", "\u{2015}", "\u{2212}",             // em dash, horizontal bar, minus sign
+            "\u{200B}", "\u{FEFF}",                         // zero-width space, BOM
+        ]
         var symbols: [Int] = []
-        for raw in text.uppercased() {
-            var ch = raw
+        for scalar in text.uppercased().unicodeScalars {
+            if separators.contains(scalar) { continue }
+            var ch = Character(scalar)
             switch ch {
             case "O": ch = "0"
             case "I", "L": ch = "1"
-            case "-", " ", "\n", "\t", ".": continue
             default: break
             }
             guard let index = alphabet.firstIndex(of: ch) else { return nil }
@@ -347,7 +359,13 @@ enum VaultCrypto {
         return SymmetricKey(data: try open(wrap.sealed, key: wrapKey, aad: aad))
     }
 
-    static func deriveKEK(recoveryKeyBytes: [UInt8], salt: Data, iterations: Int) -> SymmetricKey {
+    /// Bounds on the stored work factor. The count comes out of the vault file, which
+    /// someone able to write it could set to 0 (a parameter error), a negative number
+    /// (a trap converting to `UInt32`), or two billion (the app wedged for hours).
+    static let recoveryIterationRange = 100_000...10_000_000
+
+    static func deriveKEK(recoveryKeyBytes: [UInt8], salt: Data, iterations: Int) throws -> SymmetricKey {
+        guard recoveryIterationRange.contains(iterations), !salt.isEmpty else { throw VaultError.corrupt }
         var out = [UInt8](repeating: 0, count: 32)
         let saltBytes = [UInt8](salt)
         let status = recoveryKeyBytes.withUnsafeBufferPointer { password -> Int32 in
@@ -358,7 +376,7 @@ enum VaultCrypto {
                                      &out, out.count)
             }
         }
-        precondition(status == kCCSuccess, "PBKDF2 failed: \(status)")
+        guard status == kCCSuccess else { throw VaultError.corrupt }
         return SymmetricKey(data: out)
     }
 
@@ -366,13 +384,16 @@ enum VaultCrypto {
                              iterations: Int = recoveryIterations) throws -> RecoveryWrap {
         var salt = [UInt8](repeating: 0, count: 16)
         for i in salt.indices { salt[i] = UInt8.random(in: 0...255) }
-        let kek = deriveKEK(recoveryKeyBytes: recoveryKeyBytes, salt: Data(salt), iterations: iterations)
+        let kek = try deriveKEK(recoveryKeyBytes: recoveryKeyBytes, salt: Data(salt), iterations: iterations)
         let sealed = try seal(secret.withUnsafeBytes { Data($0) }, key: kek, aad: VaultAAD.recovery)
         return RecoveryWrap(salt: Data(salt), iterations: iterations, sealed: sealed)
     }
 
     static func openRecovery(_ wrap: RecoveryWrap, recoveryKeyBytes: [UInt8]) throws -> SymmetricKey {
-        let kek = deriveKEK(recoveryKeyBytes: recoveryKeyBytes, salt: wrap.salt, iterations: wrap.iterations)
+        // A damaged work factor is a broken file, not a wrong key — telling the two
+        // apart matters, because "wrong recovery key" would send someone hunting for
+        // a better copy of a key that was never the problem.
+        let kek = try deriveKEK(recoveryKeyBytes: recoveryKeyBytes, salt: wrap.salt, iterations: wrap.iterations)
         do { return SymmetricKey(data: try open(wrap.sealed, key: kek, aad: VaultAAD.recovery)) }
         catch { throw VaultError.wrongRecoveryKey }
     }

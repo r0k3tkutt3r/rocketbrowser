@@ -16,11 +16,26 @@ enum SavePolicy {
                        existing: [PasswordEntry], neverSave: Set<String>, isPrivate: Bool) -> Decision {
         if isPrivate { return .ignore }
         if neverSave.contains(host.lowercased()) { return .ignore }
-        let known = existing.first {
+
+        // Rocket put it there, so there is nothing new to record — true whether the
+        // entry was saved under this exact host or a sibling one it was offered on.
+        if filledByRocket, existing.contains(where: {
             SiteMatcher.matches(entryHost: $0.host, pageHost: host) && $0.username == username
+        }) {
+            return .ignore
         }
-        guard let known else { return .offerSave }
-        return filledByRocket ? .ignore : .offerUpdate(known)
+
+        // Updating is matched on the EXACT host, never merely the same registrable
+        // domain. Filling across a domain is a convenience; silently rewriting the
+        // stored password of a different host is how one compromised subdomain, or one
+        // free account on a shared hosting suffix, would overwrite the real site's
+        // entry. A near-miss becomes a second entry, which is visible and reversible.
+        guard let known = existing.first(where: {
+            SiteMatcher.isExact(entryHost: $0.host, pageHost: host) && $0.username == username
+        }) else {
+            return .offerSave
+        }
+        return .offerUpdate(known)
     }
 }
 

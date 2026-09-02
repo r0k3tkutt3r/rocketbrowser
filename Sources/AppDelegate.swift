@@ -646,6 +646,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     /// Rebuilt on open because the last item flips between "Change Recovery Key" and
     /// "Restore from Recovery Key" depending on whether this Mac can open the vault.
     private func rebuildPasswordsMenu() {
+        // `needsRestore` is a plain stored property, so it is only meaningful after the
+        // store has tried to open the file. Without this the first open of the menu on
+        // a Mac holding someone else's vault offers "Change Recovery Key…" instead of
+        // the restore it actually needs.
+        _ = PasswordStore.shared.isSetUp
         passwordsMenu.removeAllItems()
         let show = passwordsMenu.addItem(withTitle: "Show Passwords…",
                                          action: #selector(showPasswordsWindow(_:)), keyEquivalent: "p")

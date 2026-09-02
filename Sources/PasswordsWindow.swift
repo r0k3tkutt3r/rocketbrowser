@@ -4,16 +4,20 @@ import Cocoa
 /// takes it back after a minute unless something else has replaced it since.
 enum PasswordClipboard {
     static let concealed = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
-    private static var lastChangeCount = -1
 
     static func copy(_ secret: SecureString) {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         _ = secret.withString { pasteboard.setString($0, forType: .string) }
         pasteboard.setString("", forType: concealed)
-        lastChangeCount = pasteboard.changeCount
+        // Captured per copy rather than held in a shared property: with one static,
+        // copying a second password inside the minute made the first copy's timer
+        // clear the second one early.
+        let ours = pasteboard.changeCount
         DispatchQueue.main.asyncAfter(deadline: .now() + 60) {
-            if pasteboard.changeCount == lastChangeCount { pasteboard.clearContents() }
+            // Only if nothing else has taken the pasteboard since — clearing someone
+            // else's clipboard would be worse than leaving ours.
+            if pasteboard.changeCount == ours { pasteboard.clearContents() }
         }
     }
 }

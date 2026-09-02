@@ -123,11 +123,24 @@ final class PasswordStore {
 
     /// Opens the index with the silent enclave key. Synchronous on purpose: it never
     /// prompts, it happens once, and the menus and dropdown ask for `entries` inline.
+    ///
+    /// A vault that is present but unreadable must NOT look like a fresh install. It
+    /// reports `needsRestore` instead, because the alternative — falling through to
+    /// "set up Rocket Passwords" — would let the next save overwrite a real vault with
+    /// an empty one and destroy every password in it.
     private func load() {
         guard !loaded else { return }
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            // Nothing to read yet. Deliberately not latched: another Rocket instance
+            // may create the vault while this one is running.
+            return
+        }
         loaded = true
         guard let data = try? Data(contentsOf: fileURL),
-              let decoded = try? VaultCrypto.decode(VaultFile.self, from: data) else { return }
+              let decoded = try? VaultCrypto.decode(VaultFile.self, from: data) else {
+            needsRestore = true
+            return
+        }
         file = decoded
         do {
             let key = try VaultCrypto.unwrap(decoded.silent, enclave: enclave, context: nil, aad: VaultAAD.silent)
@@ -147,7 +160,11 @@ final class PasswordStore {
     func setUp(completion: @escaping (Result<String, VaultError>) -> Void) {
         load()
         guard enclave.isAvailable else { completion(.failure(.enclaveUnavailable)); return }
-        guard file == nil else { completion(.failure(.corrupt)); return }
+        // Creating a vault must never be able to replace one. The file check is the
+        // load-bearing half: an in-memory `file == nil` can also mean "this instance
+        // failed to read it", and writing over the real vault destroys it beyond any
+        // recovery key.
+        guard file == nil, !fileExists else { completion(.failure(.corrupt)); return }
         let vaultKey = SymmetricKey(size: .bits256)
         let newIndexKey = SymmetricKey(size: .bits256)
         let recoveryKey = RecoveryKey.generate()
@@ -169,16 +186,24 @@ final class PasswordStore {
                     case .failure(let error):
                         completion(.failure(error))
                     case .success(let context):
+                        // The enclave round trip stays on the queue (it can raise its
+                        // own dialog); the write happens on main, where every other
+                        // write to this file happens.
                         self.onQueue({
                             let opened = try VaultCrypto.unwrap(draft.gated, enclave: self.enclave,
                                                                 context: context, aad: VaultAAD.gated)
                             guard opened == vaultKey else { throw VaultError.corrupt }
-                            try self.write(draft)
                         }, then: { writeResult in
                             switch writeResult {
                             case .failure(let error):
                                 completion(.failure(error))
                             case .success:
+                                do {
+                                    try self.write(draft)
+                                } catch {
+                                    completion(.failure(Self.wrap(error)))
+                                    return
+                                }
                                 self.file = draft
                                 self.indexKey = newIndexKey
                                 self.entries = []
@@ -310,18 +335,28 @@ final class PasswordStore {
                     updated.secrets = try VaultCrypto.seal(newSecrets, key: key, aad: VaultAAD.secrets)
                     updated.index = try VaultCrypto.seal(newIndex, key: indexKey, aad: VaultAAD.index)
                     updated.modified = Date()
-                    try self.write(updated)
                     return (value, updated, index.entries)
                 }, then: { outcome in
                     switch outcome {
                     case .failure(let error):
                         completion(.failure(error))
                     case .success(let (value, updatedFile, updatedEntries)):
-                        if let updatedFile {
-                            self.file = updatedFile
-                            self.entries = updatedEntries
-                            NotificationCenter.default.post(name: .passwordsDidChange, object: self)
+                        guard let updatedFile else { completion(.success(value)); return }
+                        // Written here rather than on the crypto queue so that the main
+                        // thread is the single point that touches `file`, `entries` and
+                        // the file itself. Writing from the queue raced `markUsed`,
+                        // whose synchronous main-thread write could land last and
+                        // silently revert an edit — or a recovery-key rotation the user
+                        // had already been shown and told was irreversible.
+                        do {
+                            try self.write(updatedFile)
+                        } catch {
+                            completion(.failure(Self.wrap(error)))
+                            return
                         }
+                        self.file = updatedFile
+                        self.entries = updatedEntries
+                        NotificationCenter.default.post(name: .passwordsDidChange, object: self)
                         completion(.success(value))
                     }
                 })
@@ -408,13 +443,21 @@ final class PasswordStore {
                     updated.recovery = try VaultCrypto.sealRecovery(
                         key, recoveryKeyBytes: RecoveryKey.normalize(recoveryKey)!, iterations: iterations)
                     updated.modified = Date()
-                    try self.write(updated)
                     return updated
                 }, then: { outcome in
                     switch outcome {
                     case .failure(let error):
                         completion(.failure(error))
                     case .success(let updated):
+                        // On main, so nothing can overwrite the new wrap with a stale
+                        // snapshot afterwards. A rotation the user was told is
+                        // irreversible must not be the thing that silently didn't happen.
+                        do {
+                            try self.write(updated)
+                        } catch {
+                            completion(.failure(Self.wrap(error)))
+                            return
+                        }
                         self.file = updated
                         completion(.success(recoveryKey))
                     }
@@ -462,16 +505,24 @@ final class PasswordStore {
                     case .failure(let error):
                         completion(.failure(error))
                     case .success(let context):
+                        // The enclave round trip stays on the queue (it can raise its
+                        // own dialog); the write happens on main, where every other
+                        // write to this file happens.
                         self.onQueue({
                             let opened = try VaultCrypto.unwrap(draft.gated, enclave: self.enclave,
                                                                 context: context, aad: VaultAAD.gated)
                             guard opened == vaultKey else { throw VaultError.corrupt }
-                            try self.write(draft)
                         }, then: { writeResult in
                             switch writeResult {
                             case .failure(let error):
                                 completion(.failure(error))
                             case .success:
+                                do {
+                                    try self.write(draft)
+                                } catch {
+                                    completion(.failure(Self.wrap(error)))
+                                    return
+                                }
                                 self.file = draft
                                 self.indexKey = restoredIndexKey
                                 self.entries = index.entries
