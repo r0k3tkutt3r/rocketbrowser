@@ -416,7 +416,8 @@ final class PasswordAutofillController {
         case "credentialsSubmitted":
             credentialsSubmitted(body, frame: frame)
         case "usernameSubmitted":
-            guard let owner, let host = SiteMatcher.host(from: owner.webView.url ?? URL(fileURLWithPath: "/")),
+            guard let pageURL = owner?.webView.url, let host = SiteMatcher.host(from: pageURL),
+                  frameBelongsToPage(frame, pageHost: host),
                   let username = body["username"] as? String, !username.isEmpty else { return }
             lastUsername = (host, username, Date())
         case "formVanished":
