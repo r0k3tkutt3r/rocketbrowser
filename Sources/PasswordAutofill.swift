@@ -435,10 +435,18 @@ final class PasswordAutofillController {
     }
 
     /// A frame belongs to this page only when its registrable domain matches. Without
-    /// this, a hidden iframe could harvest the accounts of the site embedding it.
+    /// this, a third-party iframe could be offered — and filled with — the credentials
+    /// of the site embedding it.
+    ///
+    /// Fails closed on an empty host, which is what a sandboxed iframe's opaque origin
+    /// reports. Treating "no host" as "trusted" was the dangerous reading: a sandboxed
+    /// advertisement on a bank page would have been offered the bank's accounts, and a
+    /// fake login form inside it could have collected the fill. A same-origin
+    /// `about:blank` frame inherits its parent's host and so is unaffected.
     private func frameBelongsToPage(_ frame: WKFrameInfo, pageHost: String) -> Bool {
+        if frame.isMainFrame { return true }
         let frameHost = frame.securityOrigin.host
-        if frame.isMainFrame || frameHost.isEmpty { return true }
+        guard !frameHost.isEmpty else { return false }
         return SiteMatcher.matches(entryHost: frameHost, pageHost: pageHost)
     }
 

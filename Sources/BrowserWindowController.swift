@@ -360,6 +360,11 @@ final class BrowserWindowController: NSWindowController {
         }
         saveBubblePopover.contentViewController = bubble
         saveBubblePopover.behavior = .semitransient
+        // Dismissing by clicking away runs none of the callbacks above, and a popover
+        // holds its content controller — and so the captured password — until it is
+        // replaced. The delegate drops it the moment the bubble closes, whichever way
+        // the user closed it.
+        saveBubblePopover.delegate = self
         let rect = anchor === passwordsButton
             ? anchor.bounds
             : NSRect(x: anchor.bounds.maxX - 80, y: anchor.bounds.maxY - 1, width: 32, height: 1)
@@ -807,6 +812,17 @@ final class BrowserWindowController: NSWindowController {
         </main>
         """
         webView.loadHTMLString(html, baseURL: failingURL)
+    }
+}
+
+// MARK: - NSPopoverDelegate
+
+extension BrowserWindowController: NSPopoverDelegate {
+    /// Releases the save bubble, and with it the captured password, as soon as the
+    /// popover goes away — including the click-outside dismissal that runs no callback.
+    func popoverDidClose(_ notification: Notification) {
+        guard notification.object as? NSPopover === saveBubblePopover else { return }
+        saveBubblePopover.contentViewController = nil
     }
 }
 
