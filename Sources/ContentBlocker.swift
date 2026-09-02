@@ -75,6 +75,14 @@ final class ContentBlocker {
                 userContent.addUserScript(script)
             }
         }
+        // Unconditional, and re-added here for the same reason as PrivacyShield: this
+        // method wipes every user script, so a settings toggle must never be able to
+        // strip autofill. The "Autofill Passwords" setting is checked natively when a
+        // field reports focus — the script still has to run for the toolbar key button
+        // and for noticing a login worth saving.
+        for script in PasswordAutofill.userScripts() {
+            userContent.addUserScript(script)
+        }
     }
 
     // MARK: - Compilation

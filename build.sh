@@ -32,7 +32,12 @@ iconutil --convert icns "$STAGING/$APP_NAME.iconset" \
 
 cp Info.plist "$APP/Contents/Info.plist"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
-codesign --force --sign - "$APP"
+# Hardened runtime: no library injection, no debugger attach without root — the
+# barrier that keeps local malware out of the password vault's decrypted memory.
+# The entitlements re-grant the device access hardened runtime would otherwise cut
+# off. Only unrestricted ones belong there: a restricted entitlement on an ad-hoc
+# signature gets the app SIGKILLed by AMFI at launch.
+codesign --force --sign - --options runtime --entitlements Entitlements.plist "$APP"
 
 # Nudge Finder/Dock to re-read the icon instead of serving a cached placeholder.
 touch "$APP"
@@ -52,7 +57,8 @@ if [[ "${1:-}" == "--install" ]]; then
     fi
     rm -rf "$DEST"                      # replace wholesale, never merge in place
     ditto "$APP" "$DEST"
-    codesign --force --sign - "$DEST"   # fresh signature, so no stale cache
+    # Fresh signature, so no stale cache — same hardening as the build above.
+    codesign --force --sign - --options runtime --entitlements Entitlements.plist "$DEST"
     touch "$DEST"
     echo "Installed $DEST"
     echo "Run with: open $DEST"

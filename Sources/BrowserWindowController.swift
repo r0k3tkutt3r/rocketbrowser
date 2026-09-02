@@ -38,6 +38,11 @@ final class BrowserWindowController: NSWindowController {
     private var downloadsToolbarItem: NSToolbarItem?
     private weak var downloadsButton: NSButton?
     private let downloadsPopover = NSPopover()
+    /// The key button anchors both the account menu and the save bubble, so like the
+    /// downloads item it has to be a real view rather than a plain image toolbar item.
+    private weak var passwordsButton: NSButton?
+    private let saveBubblePopover = NSPopover()
+    private(set) lazy var passwordAutofill = PasswordAutofillController(owner: self)
     private var downloadsObserver: NSObjectProtocol?
     /// Open history visit for the page on screen, closed when the tab navigates away.
     private var currentVisitID: UUID?
@@ -58,6 +63,7 @@ final class BrowserWindowController: NSWindowController {
         static let urlField = NSToolbarItem.Identifier("rocket.urlField")
         static let reload = NSToolbarItem.Identifier("rocket.reload")
         static let bookmark = NSToolbarItem.Identifier("rocket.bookmark")
+        static let passwords = NSToolbarItem.Identifier("rocket.passwords")
         static let downloads = NSToolbarItem.Identifier("rocket.downloads")
     }
 
@@ -175,6 +181,14 @@ final class BrowserWindowController: NSWindowController {
         userContent.removeScriptMessageHandler(forName: "rocket")
         userContent.add(NewTabPageBridge.shared, name: "rocket")
 
+        // Autofill talks on its own isolated world, which is what keeps pages from
+        // seeing or calling it. Same singleton-bridge rule as above.
+        userContent.removeScriptMessageHandler(forName: PasswordAutofill.handlerName,
+                                               contentWorld: PasswordAutofill.world)
+        userContent.add(PasswordAutofillBridge.shared,
+                        contentWorld: PasswordAutofill.world,
+                        name: PasswordAutofill.handlerName)
+
         // Attention is only counted while Rocket itself is frontmost.
         let center = NotificationCenter.default
         focusObservers = [
@@ -277,6 +291,115 @@ final class BrowserWindowController: NSWindowController {
         downloadsButton?.image = NSImage(
             systemSymbolName: active ? "arrow.down.circle.fill" : "arrow.down.circle",
             accessibilityDescription: "Downloads")
+    }
+
+    // MARK: - Passwords
+
+    /// The key button's menu: the accounts saved for this site, and a way into the
+    /// manager. This is the fallback for pages where field detection finds nothing,
+    /// so it fills whatever login form the page does have.
+    @objc func showPasswordsMenu(_ sender: Any?) {
+        let menu = NSMenu()
+        let store = PasswordStore.shared
+        if let url = webView.url, !NewTabPage.isInternalURL(url), let host = SiteMatcher.host(from: url) {
+            let accounts = store.needsRestore ? [] : store.entries(for: host)
+            if accounts.isEmpty {
+                let empty = menu.addItem(withTitle: "No Saved Passwords for \(SiteMatcher.displayHost(host))",
+                                         action: nil, keyEquivalent: "")
+                empty.isEnabled = false
+            }
+            for entry in accounts {
+                // A parent-domain match says which site it was actually saved under.
+                let suffix = SiteMatcher.isExact(entryHost: entry.host, pageHost: host)
+                    ? "" : " (\(SiteMatcher.displayHost(entry.host)))"
+                let name = entry.username.isEmpty ? "password" : entry.username
+                let item = menu.addItem(withTitle: "Fill \(name)\(suffix)",
+                                        action: #selector(fillFromToolbar(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = entry.id
+            }
+            menu.addItem(.separator())
+        }
+        let manage = menu.addItem(withTitle: "Manage Passwords…",
+                                  action: #selector(AppDelegate.showPasswordsWindow(_:)), keyEquivalent: "")
+        manage.target = AppDelegate.shared
+        guard let button = passwordsButton else { return }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.maxY + 4), in: button)
+    }
+
+    @objc private func fillFromToolbar(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? UUID else { return }
+        passwordAutofill.fillFromToolbar(entryID: id)
+    }
+
+    /// Where the account list and the save bubble hang when the page cannot say where
+    /// its field is (a cross-origin frame): the key button, in screen coordinates.
+    func passwordsAnchorScreenRect() -> NSRect? {
+        guard let button = passwordsButton, let window = button.window else { return nil }
+        return window.convertToScreen(button.convert(button.bounds, to: nil))
+    }
+
+    func presentSaveBubble(decision: SavePolicy.Decision, credential: PendingCredential) {
+        guard window?.isVisible == true, let anchor = passwordsButton ?? window?.contentView else {
+            credential.password.wipe()
+            return
+        }
+        let bubble = PasswordSaveBubbleController(decision: decision, credential: credential)
+        bubble.onSave = { [weak self] username in
+            self?.saveBubblePopover.performClose(nil)
+            self?.saveFromBubble(decision: decision, credential: credential, username: username)
+        }
+        bubble.onNever = { [weak self] in
+            PasswordFlows.addNeverSave(host: credential.host)
+            credential.password.wipe()
+            self?.saveBubblePopover.performClose(nil)
+        }
+        bubble.onDismiss = { [weak self] in
+            credential.password.wipe()
+            self?.saveBubblePopover.performClose(nil)
+        }
+        saveBubblePopover.contentViewController = bubble
+        saveBubblePopover.behavior = .semitransient
+        let rect = anchor === passwordsButton
+            ? anchor.bounds
+            : NSRect(x: anchor.bounds.maxX - 80, y: anchor.bounds.maxY - 1, width: 32, height: 1)
+        saveBubblePopover.show(relativeTo: rect, of: anchor, preferredEdge: .maxY)
+    }
+
+    private func saveFromBubble(decision: SavePolicy.Decision, credential: PendingCredential, username: String) {
+        PasswordFlows.ensureSetUp(from: window) { [weak self] ready in
+            guard ready else { credential.password.wipe(); return }
+            let store = PasswordStore.shared
+            let site = SiteMatcher.displayHost(credential.host)
+            let finish: (Result<Void, VaultError>) -> Void = { result in
+                credential.password.wipe()
+                if case .failure(let error) = result { PasswordFlows.present(error, in: self?.window) }
+            }
+            switch decision {
+            case .offerUpdate(let entry):
+                // Rocket could not tell whether the password actually changed without
+                // unlocking first, so an identical one just refreshes "last used".
+                let typed = credential.password.withString { $0 }
+                store.mutate(reason: "update your password for \(site)", { index, secrets in
+                    guard let position = index.entries.firstIndex(where: { $0.id == entry.id }),
+                          var secret = secrets[entry.id] else { throw VaultError.corrupt }
+                    if secret.password != typed {
+                        secret.password = typed
+                        secrets[entry.id] = secret
+                        index.entries[position].modified = Date()
+                    }
+                    index.entries[position].username = username
+                    index.entries[position].lastUsed = Date()
+                }, completion: finish)
+            default:
+                let entry = PasswordEntry(host: credential.host, url: credential.url,
+                                          username: username, lastUsed: Date())
+                let secret = credential.password.withString {
+                    PasswordSecret(password: $0, notes: nil, otpAuth: nil)
+                }
+                store.add(entry, secret: secret, reason: "save your password for \(site)", completion: finish)
+            }
+        }
     }
 
     // MARK: - Find in page
@@ -696,6 +819,9 @@ extension BrowserWindowController: NSWindowDelegate {
 
     func windowDidResignKey(_ notification: Notification) {
         pauseActiveTiming()
+        // The panel is a child window that would otherwise float over whatever the
+        // user switched to.
+        passwordAutofill.hideDropdown()
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -706,6 +832,10 @@ extension BrowserWindowController: NSWindowDelegate {
         focusObservers.removeAll()
         suggestionsDropdown.hide()
         findController.teardown()
+        // Drops any captured password on the floor rather than carrying it past the
+        // tab that produced it. The script message handler is NOT removed: the bridge
+        // is a shared singleton, exactly like NewTabPageBridge.
+        passwordAutofill.teardown()
         if !isPrivate, let url = webView.url, !NewTabPage.isNewTabURL(url) {
             AppDelegate.shared.recordClosedTab(url: url, title: webView.title)
         }
@@ -738,7 +868,8 @@ extension BrowserWindowController: NSToolbarDelegate {
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         [ItemID.back, ItemID.forward, .flexibleSpace,
-         ItemID.urlField, .flexibleSpace, ItemID.reload, ItemID.bookmark, ItemID.downloads]
+         ItemID.urlField, .flexibleSpace, ItemID.reload, ItemID.bookmark,
+         ItemID.passwords, ItemID.downloads]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -768,6 +899,20 @@ extension BrowserWindowController: NSToolbarDelegate {
             let item = makeButton(itemIdentifier, symbol: "star", label: "Bookmark",
                                   action: #selector(toggleBookmark(_:)))
             bookmarkToolbarItem = item
+            return item
+        case ItemID.passwords:
+            // A custom view for the same reason as downloads below: the account menu
+            // and the save bubble both need a concrete anchor.
+            let button = NSButton(image: NSImage(systemSymbolName: "key.fill",
+                                                 accessibilityDescription: "Passwords")!,
+                                  target: self, action: #selector(showPasswordsMenu(_:)))
+            button.bezelStyle = .texturedRounded
+            button.setButtonType(.momentaryPushIn)
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.view = button
+            item.label = "Passwords"
+            item.toolTip = "Passwords"
+            passwordsButton = button
             return item
         case ItemID.downloads:
             // A custom view (not a plain image item) so the popover always has a
@@ -982,6 +1127,9 @@ extension BrowserWindowController: WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        // A login submitted on the previous page is offered here: reaching a new page
+        // is the closest thing to evidence that the sign-in worked.
+        passwordAutofill.pageFinished()
         // A find bar left open should describe the page now on screen.
         if isFindBarVisible, !findBar.field.stringValue.isEmpty {
             findController.search(findBar.field.stringValue, immediately: true)
@@ -1015,6 +1163,7 @@ extension BrowserWindowController: WKNavigationDelegate {
         closeCurrentVisit()
         // The engine was injected into the outgoing document; it leaves with it.
         findController.pageChanged()
+        passwordAutofill.pageChanged()
     }
 
     func closeCurrentVisit() {

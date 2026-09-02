@@ -20,6 +20,10 @@ final class LocalAuthenticator: Authenticator {
         let context = LAContext()
         // Every operation is its own decision: no reuse of a recent Touch ID.
         context.touchIDAuthenticationAllowableReuseDuration = 0
+        // If the enclave decides it wants its own authentication anyway (this context
+        // is handed straight to it afterwards), it prompts with this wording rather
+        // than a bare default.
+        context.localizedReason = reason
         var error: NSError?
         guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) else {
             completion(.failure(.authenticationFailed(error)))
@@ -45,6 +49,12 @@ final class LocalAuthenticator: Authenticator {
 /// Owns the vault. The index (sites and usernames) is decrypted once, silently, and
 /// kept; secrets exist only inside `mutate`/`withSecrets`, behind one authentication
 /// per operation unless `lockAfter` says the key may be kept for a while.
+///
+/// Every enclave call and every PBKDF2 derivation runs on `queue`, never on the main
+/// thread: the enclave may put up its own authentication dialog, and a million rounds
+/// of PBKDF2 take long enough to drop frames. State (`file`, `entries`, `indexKey`,
+/// `cachedKey`) is read and written on the main thread only; the queue is handed
+/// immutable copies and hands results back.
 final class PasswordStore {
 
     static let shared = PasswordStore()
@@ -62,6 +72,7 @@ final class PasswordStore {
     let fileURL: URL
     private let enclave: EnclaveProvider
     private let authenticator: Authenticator
+    private let queue = DispatchQueue(label: "com.kushmodi.rocket.passwords", qos: .userInitiated)
 
     /// Seconds an unlocked vault key stays cached; 0 means every operation authenticates.
     var lockAfter: TimeInterval {
@@ -110,6 +121,8 @@ final class PasswordStore {
         return entries.first { $0.id == id }
     }
 
+    /// Opens the index with the silent enclave key. Synchronous on purpose: it never
+    /// prompts, it happens once, and the menus and dropdown ask for `entries` inline.
     private func load() {
         guard !loaded else { return }
         loaded = true
@@ -129,50 +142,60 @@ final class PasswordStore {
     // MARK: Setup
 
     /// Creates the vault and returns the recovery key, which is shown exactly once.
-    /// The gated wrap is opened (one Touch ID) before anything is written: a vault
-    /// that could never be unlocked must not be saved.
+    /// The gated wrap is opened (one authentication) before anything is written: a
+    /// vault that could never be unlocked must not be saved.
     func setUp(completion: @escaping (Result<String, VaultError>) -> Void) {
         load()
         guard enclave.isAvailable else { completion(.failure(.enclaveUnavailable)); return }
+        guard file == nil else { completion(.failure(.corrupt)); return }
         let vaultKey = SymmetricKey(size: .bits256)
         let newIndexKey = SymmetricKey(size: .bits256)
         let recoveryKey = RecoveryKey.generate()
-        let draft: VaultFile
-        do {
-            draft = try makeFile(vaultKey: vaultKey, indexKey: newIndexKey,
-                                 recoveryKeyBytes: RecoveryKey.normalize(recoveryKey)!,
-                                 index: VaultIndex(), secrets: VaultSecrets())
-        } catch {
-            completion(.failure(Self.wrap(error)))
-            return
-        }
-        authenticator.authenticate(reason: "set up Rocket Passwords") { [weak self] result in
+        let iterations = recoveryIterations
+
+        // Key creation and the recovery derivation both belong off the main thread.
+        onQueue({
+            try self.makeFile(vaultKey: vaultKey, indexKey: newIndexKey,
+                              recoveryKeyBytes: RecoveryKey.normalize(recoveryKey)!,
+                              index: VaultIndex(), secrets: VaultSecrets(), iterations: iterations)
+        }, then: { [weak self] result in
             guard let self else { return }
             switch result {
             case .failure(let error):
                 completion(.failure(error))
-            case .success(let context):
-                do {
-                    let opened = try VaultCrypto.unwrap(draft.gated, enclave: self.enclave,
-                                                        context: context, aad: VaultAAD.gated)
-                    guard opened == vaultKey else { throw VaultError.corrupt }
-                    try self.write(draft)
-                    self.file = draft
-                    self.indexKey = newIndexKey
-                    self.entries = []
-                    self.needsRestore = false
-                    self.cache(vaultKey)
-                    NotificationCenter.default.post(name: .passwordsDidChange, object: self)
-                    completion(.success(recoveryKey))
-                } catch {
-                    completion(.failure(Self.wrap(error)))
+            case .success(let draft):
+                self.authenticator.authenticate(reason: "set up Rocket Passwords") { authResult in
+                    switch authResult {
+                    case .failure(let error):
+                        completion(.failure(error))
+                    case .success(let context):
+                        self.onQueue({
+                            let opened = try VaultCrypto.unwrap(draft.gated, enclave: self.enclave,
+                                                                context: context, aad: VaultAAD.gated)
+                            guard opened == vaultKey else { throw VaultError.corrupt }
+                            try self.write(draft)
+                        }, then: { writeResult in
+                            switch writeResult {
+                            case .failure(let error):
+                                completion(.failure(error))
+                            case .success:
+                                self.file = draft
+                                self.indexKey = newIndexKey
+                                self.entries = []
+                                self.needsRestore = false
+                                self.cache(vaultKey)
+                                NotificationCenter.default.post(name: .passwordsDidChange, object: self)
+                                completion(.success(recoveryKey))
+                            }
+                        })
+                    }
                 }
             }
-        }
+        })
     }
 
     private func makeFile(vaultKey: SymmetricKey, indexKey: SymmetricKey, recoveryKeyBytes: [UInt8],
-                          index: VaultIndex, secrets: VaultSecrets) throws -> VaultFile {
+                          index: VaultIndex, secrets: VaultSecrets, iterations: Int) throws -> VaultFile {
         let gatedBlob = try enclave.makeKey(gated: true)
         let silentBlob = try enclave.makeKey(gated: false)
         return VaultFile(
@@ -180,12 +203,22 @@ final class PasswordStore {
             gated: try VaultCrypto.wrap(vaultKey, blob: gatedBlob, enclave: enclave, aad: VaultAAD.gated),
             silent: try VaultCrypto.wrap(indexKey, blob: silentBlob, enclave: enclave, aad: VaultAAD.silent),
             recovery: try VaultCrypto.sealRecovery(vaultKey, recoveryKeyBytes: recoveryKeyBytes,
-                                                   iterations: recoveryIterations),
+                                                   iterations: iterations),
             indexKeyUnderVaultKey: try VaultCrypto.seal(indexKey.withUnsafeBytes { Data($0) },
                                                         key: vaultKey, aad: VaultAAD.indexKey),
             index: try VaultCrypto.seal(try VaultCrypto.encode(index), key: indexKey, aad: VaultAAD.index),
             secrets: try VaultCrypto.seal(try VaultCrypto.encode(secrets), key: vaultKey, aad: VaultAAD.secrets),
             modified: Date())
+    }
+
+    /// Runs `work` on the crypto queue and delivers its result on the main thread.
+    private func onQueue<T>(_ work: @escaping () throws -> T,
+                            then completion: @escaping (Result<T, VaultError>) -> Void) {
+        queue.async {
+            let result: Result<T, VaultError>
+            do { result = .success(try work()) } catch { result = .failure(Self.wrap(error)) }
+            DispatchQueue.main.async { completion(result) }
+        }
     }
 
     // MARK: Unlocking
@@ -207,14 +240,13 @@ final class PasswordStore {
             case .failure(let error):
                 completion(.failure(error))
             case .success(let context):
-                do {
-                    let key = try VaultCrypto.unwrap(file.gated, enclave: self.enclave,
-                                                     context: context, aad: VaultAAD.gated)
-                    self.cache(key)
-                    completion(.success(key))
-                } catch {
-                    completion(.failure(Self.wrap(error)))
-                }
+                self.onQueue({
+                    try VaultCrypto.unwrap(file.gated, enclave: self.enclave,
+                                           context: context, aad: VaultAAD.gated)
+                }, then: { unwrapped in
+                    if case .success(let key) = unwrapped { self.cache(key) }
+                    completion(unwrapped)
+                })
             }
         }
     }
@@ -246,6 +278,7 @@ final class PasswordStore {
 
     /// The only path to K. Runs `body` with the decrypted secrets and a working copy of
     /// the index; whatever it changes is re-sealed and saved before `completion`.
+    /// `body` runs off the main thread, so it must stay pure data work — no UI.
     func mutate<T>(reason: String,
                    _ body: @escaping (inout VaultIndex, inout VaultSecrets) throws -> T,
                    completion: @escaping (Result<T, VaultError>) -> Void) {
@@ -255,30 +288,43 @@ final class PasswordStore {
             case .failure(let error):
                 completion(.failure(error))
             case .success(let key):
-                do {
-                    guard var file = self.file, let indexKey = self.indexKey else { throw VaultError.notSetUp }
+                guard let file = self.file, let indexKey = self.indexKey else {
+                    completion(.failure(.notSetUp))
+                    return
+                }
+                let currentEntries = self.entries
+                self.onQueue({ () -> (T, VaultFile?, [PasswordEntry]) in
                     var secretsData = try VaultCrypto.open(file.secrets, key: key, aad: VaultAAD.secrets)
                     defer { secretsData.resetBytes(in: 0..<secretsData.count) }
                     var secrets = try VaultCrypto.decode(VaultSecrets.self, from: secretsData)
-                    var index = VaultIndex(entries: self.entries)
+                    var index = VaultIndex(entries: currentEntries)
                     let value = try body(&index, &secrets)
                     var newSecrets = try VaultCrypto.encode(secrets)
                     defer { newSecrets.resetBytes(in: 0..<newSecrets.count) }
                     let newIndex = try VaultCrypto.encode(index)
-                    let oldIndex = try VaultCrypto.encode(VaultIndex(entries: self.entries))
-                    if newSecrets != secretsData || newIndex != oldIndex {
-                        file.secrets = try VaultCrypto.seal(newSecrets, key: key, aad: VaultAAD.secrets)
-                        file.index = try VaultCrypto.seal(newIndex, key: indexKey, aad: VaultAAD.index)
-                        file.modified = Date()
-                        try self.write(file)
-                        self.file = file
-                        self.entries = index.entries
-                        NotificationCenter.default.post(name: .passwordsDidChange, object: self)
+                    let oldIndex = try VaultCrypto.encode(VaultIndex(entries: currentEntries))
+                    guard newSecrets != secretsData || newIndex != oldIndex else {
+                        return (value, nil, currentEntries)
                     }
-                    completion(.success(value))
-                } catch {
-                    completion(.failure(Self.wrap(error)))
-                }
+                    var updated = file
+                    updated.secrets = try VaultCrypto.seal(newSecrets, key: key, aad: VaultAAD.secrets)
+                    updated.index = try VaultCrypto.seal(newIndex, key: indexKey, aad: VaultAAD.index)
+                    updated.modified = Date()
+                    try self.write(updated)
+                    return (value, updated, index.entries)
+                }, then: { outcome in
+                    switch outcome {
+                    case .failure(let error):
+                        completion(.failure(error))
+                    case .success(let (value, updatedFile, updatedEntries)):
+                        if let updatedFile {
+                            self.file = updatedFile
+                            self.entries = updatedEntries
+                            NotificationCenter.default.post(name: .passwordsDidChange, object: self)
+                        }
+                        completion(.success(value))
+                    }
+                })
             }
         }
     }
@@ -326,7 +372,8 @@ final class PasswordStore {
         }, completion: completion)
     }
 
-    /// Index-only, so it never prompts: the index key is this Mac's to use.
+    /// Index-only, so it never prompts: the index key is this Mac's to use. Cheap
+    /// enough (one small AES-GCM seal and a write) to stay synchronous.
     func markUsed(id: UUID) {
         load()
         guard let position = entries.firstIndex(where: { $0.id == id }) else { return }
@@ -353,18 +400,25 @@ final class PasswordStore {
             case .failure(let error):
                 completion(.failure(error))
             case .success(let key):
-                do {
-                    guard var file = self.file else { throw VaultError.notSetUp }
-                    let recoveryKey = RecoveryKey.generate()
-                    file.recovery = try VaultCrypto.sealRecovery(key, recoveryKeyBytes: RecoveryKey.normalize(recoveryKey)!,
-                                                                 iterations: self.recoveryIterations)
-                    file.modified = Date()
-                    try self.write(file)
-                    self.file = file
-                    completion(.success(recoveryKey))
-                } catch {
-                    completion(.failure(Self.wrap(error)))
-                }
+                guard let file = self.file else { completion(.failure(.notSetUp)); return }
+                let recoveryKey = RecoveryKey.generate()
+                let iterations = self.recoveryIterations
+                self.onQueue({ () -> VaultFile in
+                    var updated = file
+                    updated.recovery = try VaultCrypto.sealRecovery(
+                        key, recoveryKeyBytes: RecoveryKey.normalize(recoveryKey)!, iterations: iterations)
+                    updated.modified = Date()
+                    try self.write(updated)
+                    return updated
+                }, then: { outcome in
+                    switch outcome {
+                    case .failure(let error):
+                        completion(.failure(error))
+                    case .success(let updated):
+                        self.file = updated
+                        completion(.success(recoveryKey))
+                    }
+                })
             }
         }
     }
@@ -374,61 +428,63 @@ final class PasswordStore {
     /// kept, so the same paper still works afterwards.
     func restore(recoveryKey: String, completion: @escaping (Result<Void, VaultError>) -> Void) {
         guard enclave.isAvailable else { completion(.failure(.enclaveUnavailable)); return }
-        guard let data = try? Data(contentsOf: fileURL),
-              let existing = try? VaultCrypto.decode(VaultFile.self, from: data) else {
-            completion(.failure(.corrupt))
+        guard let bytes = RecoveryKey.normalize(recoveryKey) else {
+            completion(.failure(.wrongRecoveryKey))
             return
         }
-        guard let bytes = RecoveryKey.normalize(recoveryKey) else { completion(.failure(.wrongRecoveryKey)); return }
-        let vaultKey: SymmetricKey
-        let restoredIndexKey: SymmetricKey
-        let index: VaultIndex
-        let secrets: VaultSecrets
-        do {
-            vaultKey = try VaultCrypto.openRecovery(existing.recovery, recoveryKeyBytes: bytes)
-            restoredIndexKey = SymmetricKey(data: try VaultCrypto.open(existing.indexKeyUnderVaultKey,
-                                                                        key: vaultKey, aad: VaultAAD.indexKey))
-            index = try VaultCrypto.decode(VaultIndex.self,
-                                           from: try VaultCrypto.open(existing.index, key: restoredIndexKey, aad: VaultAAD.index))
-            secrets = try VaultCrypto.decode(VaultSecrets.self,
-                                             from: try VaultCrypto.open(existing.secrets, key: vaultKey, aad: VaultAAD.secrets))
-        } catch {
-            completion(.failure(Self.wrap(error)))
-            return
-        }
-        let draft: VaultFile
-        do {
-            var rebuilt = try makeFile(vaultKey: vaultKey, indexKey: restoredIndexKey, recoveryKeyBytes: bytes,
-                                       index: index, secrets: secrets)
+        let iterations = recoveryIterations
+        onQueue({ () -> (VaultFile, SymmetricKey, SymmetricKey, VaultIndex) in
+            guard let data = try? Data(contentsOf: self.fileURL),
+                  let existing = try? VaultCrypto.decode(VaultFile.self, from: data) else {
+                throw VaultError.corrupt
+            }
+            let vaultKey = try VaultCrypto.openRecovery(existing.recovery, recoveryKeyBytes: bytes)
+            let restoredIndexKey = SymmetricKey(data: try VaultCrypto.open(
+                existing.indexKeyUnderVaultKey, key: vaultKey, aad: VaultAAD.indexKey))
+            let index = try VaultCrypto.decode(VaultIndex.self, from: try VaultCrypto.open(
+                existing.index, key: restoredIndexKey, aad: VaultAAD.index))
+            let secrets = try VaultCrypto.decode(VaultSecrets.self, from: try VaultCrypto.open(
+                existing.secrets, key: vaultKey, aad: VaultAAD.secrets))
+            var rebuilt = try self.makeFile(vaultKey: vaultKey, indexKey: restoredIndexKey,
+                                            recoveryKeyBytes: bytes, index: index, secrets: secrets,
+                                            iterations: iterations)
+            // The key on paper keeps working: only the enclave wraps are replaced.
             rebuilt.recovery = existing.recovery
-            draft = rebuilt
-        } catch {
-            completion(.failure(Self.wrap(error)))
-            return
-        }
-        authenticator.authenticate(reason: "restore Rocket Passwords on this Mac") { [weak self] result in
+            return (rebuilt, vaultKey, restoredIndexKey, index)
+        }, then: { [weak self] prepared in
             guard let self else { return }
-            switch result {
+            switch prepared {
             case .failure(let error):
                 completion(.failure(error))
-            case .success(let context):
-                do {
-                    let opened = try VaultCrypto.unwrap(draft.gated, enclave: self.enclave,
-                                                        context: context, aad: VaultAAD.gated)
-                    guard opened == vaultKey else { throw VaultError.corrupt }
-                    try self.write(draft)
-                    self.file = draft
-                    self.indexKey = restoredIndexKey
-                    self.entries = index.entries
-                    self.needsRestore = false
-                    self.loaded = true
-                    NotificationCenter.default.post(name: .passwordsDidChange, object: self)
-                    completion(.success(()))
-                } catch {
-                    completion(.failure(Self.wrap(error)))
+            case .success(let (draft, vaultKey, restoredIndexKey, index)):
+                self.authenticator.authenticate(reason: "restore Rocket Passwords on this Mac") { authResult in
+                    switch authResult {
+                    case .failure(let error):
+                        completion(.failure(error))
+                    case .success(let context):
+                        self.onQueue({
+                            let opened = try VaultCrypto.unwrap(draft.gated, enclave: self.enclave,
+                                                                context: context, aad: VaultAAD.gated)
+                            guard opened == vaultKey else { throw VaultError.corrupt }
+                            try self.write(draft)
+                        }, then: { writeResult in
+                            switch writeResult {
+                            case .failure(let error):
+                                completion(.failure(error))
+                            case .success:
+                                self.file = draft
+                                self.indexKey = restoredIndexKey
+                                self.entries = index.entries
+                                self.needsRestore = false
+                                self.loaded = true
+                                NotificationCenter.default.post(name: .passwordsDidChange, object: self)
+                                completion(.success(()))
+                            }
+                        })
+                    }
                 }
             }
-        }
+        })
     }
 
     // MARK: Disk

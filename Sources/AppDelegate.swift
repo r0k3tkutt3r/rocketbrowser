@@ -18,6 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     private let bookmarksMenu = NSMenu(title: "Bookmarks")
     private let suggestionsMenu = NSMenu(title: "New Tab Suggestions")
     private let securityMenu = NSMenu(title: "Download Scanning")
+    private let passwordsMenu = NSMenu(title: "Passwords")
     /// Recently closed tabs, newest last — the ⇧⌘T stack.
     private var closedTabs: [(url: URL, title: String?)] = []
     /// The session as it was at launch, read once and kept.
@@ -42,6 +43,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         IncognitoSession.purgeLeftoverStores()
         // Picks up a key file (project folder or Application Support) into the keychain.
         VirusTotal.importKeyFromFileIfAvailable()
+
+        observePasswordLockTriggers()
+        // The manager window knows nothing about tabs; opening a site goes through here.
+        PasswordsWindowController.openURL = { [weak self] url in
+            guard let self else { return }
+            if let front = self.frontNormalBrowserController {
+                front.openInNewTab(url)
+            } else {
+                self.openNewWindow(url: url)
+            }
+        }
 
         ContentBlocker.shared.applyToAllWebViews = { [weak self] in
             guard let self else { return }
@@ -85,6 +97,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        PasswordStore.shared.lockNow()
         HistoryStore.shared.flush()
         SessionStore.shared.flush { currentSessionSnapshot() }
     }
@@ -230,6 +243,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
 
     @objc func toggleSessionRestore(_ sender: Any?) {
         SessionStore.restoresOnLaunch.toggle()
+    }
+
+    // MARK: - Passwords
+
+    @objc func showPasswordsWindow(_ sender: Any?) {
+        PasswordsWindowController.shared.show()
+    }
+
+    @objc func importPasswords(_ sender: Any?) {
+        PasswordFlows.importCSV(from: NSApp.keyWindow)
+    }
+
+    @objc func exportPasswords(_ sender: Any?) {
+        PasswordFlows.exportCSV(from: NSApp.keyWindow)
+    }
+
+    @objc func lockPasswords(_ sender: Any?) {
+        PasswordStore.shared.lockNow()
+    }
+
+    @objc func togglePasswordAutofill(_ sender: Any?) {
+        PasswordFlows.autofillEnabled.toggle()
+    }
+
+    @objc func togglePasswordSaving(_ sender: Any?) {
+        PasswordFlows.offersToSave.toggle()
+    }
+
+    @objc func setPasswordsLockAfter(_ sender: NSMenuItem) {
+        PasswordFlows.lockAfterSeconds = sender.tag
+    }
+
+    @objc func changeRecoveryKey(_ sender: Any?) {
+        PasswordFlows.changeRecoveryKey(from: NSApp.keyWindow)
+    }
+
+    @objc func restorePasswords(_ sender: Any?) {
+        PasswordFlows.promptRestore(from: NSApp.keyWindow) { _ in }
+    }
+
+    /// The decrypted vault key never survives the Mac going to sleep, the screen
+    /// locking, or the session switching away — whatever "Lock After" says.
+    private func observePasswordLockTriggers() {
+        let workspace = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.willSleepNotification,
+                     NSWorkspace.screensDidSleepNotification,
+                     NSWorkspace.sessionDidResignActiveNotification] {
+            workspace.addObserver(forName: name, object: nil, queue: .main) { _ in
+                PasswordStore.shared.lockNow()
+            }
+        }
+        // Not posted on the workspace centre: screen lock is a distributed notification.
+        DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("com.apple.screenIsLocked"), object: nil, queue: .main
+        ) { _ in
+            PasswordStore.shared.lockNow()
+        }
     }
 
     // MARK: - History window
@@ -568,6 +638,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
             rebuildSuggestionsMenu()
         } else if menu === securityMenu {
             rebuildSecurityMenu()
+        } else if menu === passwordsMenu {
+            rebuildPasswordsMenu()
+        }
+    }
+
+    /// Rebuilt on open because the last item flips between "Change Recovery Key" and
+    /// "Restore from Recovery Key" depending on whether this Mac can open the vault.
+    private func rebuildPasswordsMenu() {
+        passwordsMenu.removeAllItems()
+        let show = passwordsMenu.addItem(withTitle: "Show Passwords…",
+                                         action: #selector(showPasswordsWindow(_:)), keyEquivalent: "p")
+        show.keyEquivalentModifierMask = [.command, .option]
+        passwordsMenu.addItem(withTitle: "Import from CSV…",
+                              action: #selector(importPasswords(_:)), keyEquivalent: "")
+        passwordsMenu.addItem(withTitle: "Export to CSV…",
+                              action: #selector(exportPasswords(_:)), keyEquivalent: "")
+        passwordsMenu.addItem(withTitle: "Lock Now",
+                              action: #selector(lockPasswords(_:)), keyEquivalent: "")
+        passwordsMenu.addItem(.separator())
+        passwordsMenu.addItem(withTitle: "Autofill Passwords",
+                              action: #selector(togglePasswordAutofill(_:)), keyEquivalent: "")
+        passwordsMenu.addItem(withTitle: "Offer to Save Passwords",
+                              action: #selector(togglePasswordSaving(_:)), keyEquivalent: "")
+        let lockMenu = NSMenu(title: "Lock After")
+        for choice in PasswordFlows.lockAfterChoices {
+            let item = lockMenu.addItem(withTitle: choice.title,
+                                        action: #selector(setPasswordsLockAfter(_:)), keyEquivalent: "")
+            item.tag = choice.seconds
+            item.target = self
+        }
+        let lockParent = passwordsMenu.addItem(withTitle: "Lock After", action: nil, keyEquivalent: "")
+        passwordsMenu.setSubmenu(lockMenu, for: lockParent)
+        passwordsMenu.addItem(.separator())
+        if PasswordStore.shared.needsRestore {
+            passwordsMenu.addItem(withTitle: "Restore from Recovery Key…",
+                                  action: #selector(restorePasswords(_:)), keyEquivalent: "")
+        } else {
+            passwordsMenu.addItem(withTitle: "Change Recovery Key…",
+                                  action: #selector(changeRecoveryKey(_:)), keyEquivalent: "")
         }
     }
 
@@ -902,6 +1011,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
                           action: #selector(toggleChunkedDownloads(_:)),
                           keyEquivalent: "")
         toolsMenu.addItem(.separator())
+        let passwordsParent = toolsMenu.addItem(withTitle: "Passwords", action: nil, keyEquivalent: "")
+        passwordsMenu.delegate = self
+        toolsMenu.setSubmenu(passwordsMenu, for: passwordsParent)
+        rebuildPasswordsMenu()
+        toolsMenu.addItem(.separator())
         let suggestionsParent = toolsMenu.addItem(withTitle: "New Tab Suggestions",
                                                   action: nil, keyEquivalent: "")
         suggestionsMenu.delegate = self
@@ -1024,6 +1138,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         case #selector(excludeCurrentSite(_:)):
             return SuggestionEngine.shared.isEnabled
                 && frontBrowserController?.webView.url?.host != nil
+        case #selector(lockPasswords(_:)):
+            return PasswordStore.shared.isUnlocked
+        case #selector(togglePasswordAutofill(_:)):
+            menuItem.state = PasswordFlows.autofillEnabled ? .on : .off
+            return true
+        case #selector(togglePasswordSaving(_:)):
+            menuItem.state = PasswordFlows.offersToSave ? .on : .off
+            return true
+        case #selector(setPasswordsLockAfter(_:)):
+            menuItem.state = menuItem.tag == PasswordFlows.lockAfterSeconds ? .on : .off
+            return true
+        case #selector(changeRecoveryKey(_:)), #selector(exportPasswords(_:)):
+            return PasswordStore.shared.isSetUp
+        case #selector(restorePasswords(_:)):
+            return PasswordStore.shared.needsRestore
         default:
             return true
         }
