@@ -12,14 +12,21 @@ enum SavePolicy {
     /// Rocket cannot compare the typed password with the saved one without unlocking,
     /// so a known account typed by hand is offered as an update; choosing Update
     /// unlocks, and an identical password just bumps `lastUsed`.
-    static func decide(host: String, username: String, filledByRocket: Bool,
+    static func decide(host: String, username: String, filledByRocket: Bool, generated: Bool,
                        existing: [PasswordEntry], neverSave: Set<String>, isPrivate: Bool) -> Decision {
         if isPrivate { return .ignore }
         if neverSave.contains(host.lowercased()) { return .ignore }
 
         // Rocket put it there, so there is nothing new to record — true whether the
         // entry was saved under this exact host or a sibling one it was offered on.
-        if filledByRocket, existing.contains(where: {
+        //
+        // A password Rocket GENERATED is the exception, and it is not a small one: it
+        // came out of nowhere, so "Rocket filled this box" cannot mean "the vault
+        // already has this". Every password-change and reset form has a new-password
+        // box and no username box, which made the empty-username clause below match
+        // whatever account was being replaced — and a password nobody has ever seen
+        // was then dropped in silence, leaving the dead one in the vault.
+        if filledByRocket, !generated, existing.contains(where: {
             guard SiteMatcher.matches(entryHost: $0.host, pageHost: host) else { return false }
             // A form with no username box reports an empty one, which would otherwise
             // miss the entry Rocket just filled from and offer to save a duplicate.

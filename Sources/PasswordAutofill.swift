@@ -46,6 +46,9 @@ enum PasswordAutofill {
         // a value the page pre-filled is not the user's password.
         var touched = new WeakSet();
         var filledByRocket = new WeakMap();
+        // Kept apart from filledByRocket: a password Rocket GENERATED is one the vault
+        // has never seen, so "Rocket filled this" must not be read as "already saved".
+        var generatedByRocket = new WeakMap();
         var nativeValueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
 
         function isVisible(el) {
@@ -370,7 +373,7 @@ enum PasswordAutofill {
             return pressEnter(field || record.password);
         }
 
-        function fill(fieldID, username, password, submit) {
+        function fill(fieldID, username, password, submit, generated) {
             var el = elements[fieldID];
             var info = classify(el);
             if (!info) { return false; }
@@ -389,7 +392,11 @@ enum PasswordAutofill {
             var record = info.record;
             if (username != null && record.username) { setValue(record.username, username); }
             if (password != null) {
-                record.passwords.forEach(function (p) { setValue(p, password); filledByRocket.set(p, password); });
+                record.passwords.forEach(function (p) {
+                    setValue(p, password);
+                    filledByRocket.set(p, password);
+                    if (generated) { generatedByRocket.set(p, password); }
+                });
             }
             try { el.focus(); } catch (e) {}
             // Submitting needs positive evidence that this IS a sign-in form, not just
@@ -448,7 +455,8 @@ enum PasswordAutofill {
             lastCapture = key;
             post({ action: 'credentialsSubmitted', url: location.href,
                    username: username, password: password, isSignUp: record.isSignUp,
-                   filledByRocket: filledByRocket.get(record.password) === password });
+                   filledByRocket: filledByRocket.get(record.password) === password,
+                   generated: generatedByRocket.get(record.password) === password });
             watched = record.password;
             observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true,
                                                          attributeFilter: ['style', 'class', 'hidden'] });
@@ -518,9 +526,13 @@ struct PendingCredential {
     let capturedAt: Date
     let filledByRocket: Bool
     let isSignUp: Bool
+    /// Rocket made this password up. Nothing else in the world has a copy of it.
+    let generated: Bool
 
-    /// A prompt that arrives long after the submit is noise, not a save offer.
-    static let maximumAge: TimeInterval = 60
+    /// A prompt that arrives long after the submit is noise, not a save offer — except
+    /// for a generated password, where the offer is the only copy that will ever exist
+    /// and filling in the rest of a sign-up form easily takes longer than a minute.
+    var maximumAge: TimeInterval { generated ? 1800 : 60 }
 }
 
 /// The native half of autofill for one tab: the account panel, the fill, and the
@@ -654,7 +666,12 @@ final class PasswordAutofillController {
         for entry in accounts {
             items.append(.account(entry, showsHost: !SiteMatcher.isExact(entryHost: entry.host, pageHost: pageHost)))
         }
-        if field.isSignUp, field.kind == "password" { items.append(.strongPassword) }
+        // The row promises "Rocket will offer to save it", and a generated password is
+        // gone for good if that promise is not kept: incognito never saves, and neither
+        // does Rocket with "Offer to Save Passwords" switched off.
+        if field.isSignUp, field.kind == "password", !owner.isPrivate, PasswordFlows.offersToSave {
+            items.append(.strongPassword)
+        }
         guard items.contains(where: { $0.isSelectable }) else { hideDropdown(); return }
         items.append(.manage)
         guard let window = owner.window, let anchor = screenRect(for: field) else { hideDropdown(); return }
@@ -763,9 +780,11 @@ final class PasswordAutofillController {
                 }
             }
         case .strongPassword:
+            let generated = PasswordGenerator.make()
             // Never submitted: a sign-up form still needs the rest of its boxes.
-            fill(fieldID: focused.id, username: nil, password: PasswordGenerator.make(),
-                 submit: false, in: focused.frame)
+            fill(fieldID: focused.id, username: nil, password: generated,
+                 submit: false, generated: true, in: focused.frame)
+            hold(generated: generated)
         case .manage:
             PasswordsWindowController.shared.show()
         case .caption:
@@ -782,12 +801,28 @@ final class PasswordAutofillController {
 
     /// The password rides as an argument, never spliced into JavaScript source.
     private func fill(fieldID: Int, username: String?, password: String?,
-                      submit: Bool, in frame: WKFrameInfo?) {
+                      submit: Bool, generated: Bool = false, in frame: WKFrameInfo?) {
         owner?.webView.callAsyncJavaScript(
-            "return window.__rocketPasswords ? window.__rocketPasswords.fill(fieldID, username, password, submit) : false;",
+            "return window.__rocketPasswords ? window.__rocketPasswords.fill(fieldID, username, password, submit, generated) : false;",
             arguments: ["fieldID": fieldID, "username": username ?? NSNull(),
-                        "password": password ?? NSNull(), "submit": submit],
+                        "password": password ?? NSNull(), "submit": submit, "generated": generated],
             in: frame, in: PasswordAutofill.world) { _ in }
+    }
+
+    /// A generated password is held the instant it is made, not when the page submits.
+    /// Everything that reaches `credentialsSubmitted` depends on the page: a submit
+    /// button outside the form's scope, a router that never fires `submit`, a form that
+    /// clears its fields — any of them and the capture never happens. For a password
+    /// the user typed that costs a save offer; for one Rocket invented, and that the
+    /// site is about to start demanding, it destroys the only copy. A real submit
+    /// replaces this with the same password and the username that went with it.
+    private func hold(generated password: String) {
+        guard let owner, !owner.isPrivate,
+              let pageURL = owner.webView.url, let host = SiteMatcher.host(from: pageURL) else { return }
+        pendingCredential?.password.wipe()
+        pendingCredential = PendingCredential(host: host, url: pageURL.absoluteString, username: "",
+                                              password: SecureString(password), capturedAt: Date(),
+                                              filledByRocket: true, isSignUp: true, generated: true)
     }
 
     /// The toolbar key menu: fills whatever login form the main frame has, for the
@@ -848,19 +883,21 @@ final class PasswordAutofillController {
                                               username: username, password: SecureString(password),
                                               capturedAt: Date(),
                                               filledByRocket: body["filledByRocket"] as? Bool ?? false,
-                                              isSignUp: body["isSignUp"] as? Bool ?? false)
+                                              isSignUp: body["isSignUp"] as? Bool ?? false,
+                                              generated: body["generated"] as? Bool ?? false)
     }
 
     func offerSaveIfPending() {
         guard let owner, let pending = pendingCredential else { return }
         pendingCredential = nil
-        guard Date().timeIntervalSince(pending.capturedAt) < PendingCredential.maximumAge else {
+        guard Date().timeIntervalSince(pending.capturedAt) < pending.maximumAge else {
             pending.password.wipe()
             return
         }
         let store = PasswordStore.shared
         let decision = SavePolicy.decide(host: pending.host, username: pending.username,
                                          filledByRocket: pending.filledByRocket,
+                                         generated: pending.generated,
                                          existing: store.needsRestore ? [] : store.entriesLoaded,
                                          neverSave: PasswordFlows.neverSaveHosts,
                                          isPrivate: owner.isPrivate)
