@@ -93,6 +93,16 @@ final class BrowserWindowController: NSWindowController {
         if preferences.responds(to: NSSelectorFromString("_setDeveloperExtrasEnabled:")) {
             preferences.setValue(true, forKey: "developerExtrasEnabled")
         }
+        // And where it opens, which is the difference between a Web Inspector and a
+        // flickering blank window. WebKit's default is *attached*: it inserts a
+        // `WKInspectorWKWebView` into this window's content view and then resizes the
+        // inspected view by hand — but the web view below is pinned to all four edges with
+        // constraints, so Auto Layout puts it straight back over the top. Measured on a
+        // clean profile: the inspector lands at 1100×500 underneath a page view still at
+        // the full 1100×752, with no window of its own to close. WebKit reads this
+        // preference when it builds the inspector, so setting it here is what makes even
+        // WebKit's own right-click Inspect Element open in a window of its own.
+        BrowserWindowController.forceDetachedInspector()
         // RocketWebView only exists to guarantee the right-click Inspect Element item;
         // popups come through this initializer too, so they get it as well.
         self.webView = RocketWebView(frame: .zero, configuration: configuration)
@@ -1397,9 +1407,23 @@ extension BrowserWindowController {
     }
 
     private func callInspector(_ name: String) {
+        // WebKit rewrites the preference whenever the inspector is docked or undocked, so
+        // reassert it here too: docking it by hand would otherwise bring back the blank
+        // flickering panel for the rest of the session.
+        Self.forceDetachedInspector()
         let selector = NSSelectorFromString(name)
         guard let inspector, inspector.responds(to: selector) else { return }
         inspector.perform(selector)
+    }
+
+    /// Detached is the only mode that works in a window that lays its web view out with
+    /// constraints — the reasoning is beside the call in `init`.
+    ///
+    /// ponytail: this overrides docking the inspector by hand. Making attached work means
+    /// laying the web view out by frame instead of by constraints.
+    static func forceDetachedInspector() {
+        UserDefaults.standard.set(
+            false, forKey: "__WebInspectorPageGroupLevel1__.WebKit2InspectorStartsAttached")
     }
 
     /// Toggles, the way ⌥⌘I does in Safari.

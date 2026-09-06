@@ -120,7 +120,27 @@ the app open the inspector itself, and measured, `_WKInspector.show()` on a view
 `isInspectable` alone does nothing at all — `isConnected` stays 0. The switch that matters
 is the private `developerExtrasEnabled` preference, set in `BrowserWindowController.init`
 beside the backspace preference so popups get it too. With it on, `show`, `showConsole`
-and `close` all work, and ⌥⌘I toggles the way Safari's does. "View Page Source" serialises
+and `close` all work, and ⌥⌘I toggles the way Safari's does.
+
+Turning it on is only half of it: the inspector must also be told to open **detached**,
+which `forceDetachedInspector` does by writing WebKit's private
+`WebKit2InspectorStartsAttached` preference. WebKit's default is attached, and attached
+cannot work here — it inserts a `WKInspectorWKWebView` into the window's content view and
+then resizes the inspected view by hand, while that view is pinned to all four edges with
+constraints. Measured on a clean profile: the inspector lands at 1100×500 underneath a
+page view still at the full 1100×752, so it is invisible behind the page, has no window of
+its own to close, and flickers while Auto Layout and WebKit take turns. That was a real
+bug, reported as "flashes like crazy, the pane is blank, I can't exit". Calling `detach`
+straight after `show` does NOT fix it (measured: no effect at all) — the preference has to
+be set before WebKit builds the inspector, which is why it is written in `init`, where it
+also covers WebKit's own right-click item, and again in `callInspector`, because WebKit
+rewrites that key whenever the inspector is docked or undocked by hand. Two harness
+findings worth keeping: a closed `_WKInspectorWindow` stays in `NSApp.windows` hidden and
+a reopen builds a second one, so "is the inspector open" means *any* inspector window is
+visible; and `isVisible` on `_WKInspector` reports true for the attached-and-invisible
+case, so it cannot be used to tell whether anything is actually on screen.
+
+"View Page Source" serialises
 `document.documentElement.outerHTML` into a new tab as escaped text — the live DOM, not
 the bytes the server sent, which the page's own header says out loud. That tab is opened
 by `openSourceTab`, not `openInNewTab(nil)`: the latter starts the new tab page loading
