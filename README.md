@@ -8,6 +8,7 @@ seconds with `swiftc`.
 
 - Tabs — native macOS window tabs (⌘T / ⌘W, ⌘1–⌘9 to jump, drag to reorder)
 - New tab page — local start page with customizable wallpaper
+- Quad-stream download chunking for a ~2x speed improvement
 - Learned suggestions — tiny local neural net that suggests sites you usually visit at this time
 - Bookmarks bar — folders, drag to move, ⇧⌘B to toggle
 - Ad & tracker blocking — native WebKit rules with curated ~65-domain blocklist
