@@ -75,6 +75,12 @@ final class ContentBlocker {
                 userContent.addUserScript(script)
             }
         }
+        // Never in incognito: warming a hovered link tells that host you looked at it.
+        if WaypointPreconnect.isEnabled && !isIncognito {
+            for script in WaypointPreconnect.userScripts() {
+                userContent.addUserScript(script)
+            }
+        }
         // Unconditional, and re-added here for the same reason as PrivacyShield: this
         // method wipes every user script, so a settings toggle must never be able to
         // strip autofill. The "Autofill Passwords" setting is checked natively when a

@@ -1,7 +1,7 @@
 # Rocket 🚀
 
 A small, fast personal browser for macOS built on Safari's WebKit engine (WKWebView).
-Pure Swift + AppKit, ~1,100 lines, no Xcode project, no dependencies — builds in a few
+Pure Swift + AppKit, ~13,000 lines, no Xcode project, no dependencies — builds in a few
 seconds with `swiftc`.
 
 ## Features
@@ -9,6 +9,7 @@ seconds with `swiftc`.
 - Tabs — native macOS window tabs (⌘T / ⌘W, ⌘1–⌘9 to jump, drag to reorder)
 - New tab page — local start page with customizable wallpaper
 - Quad-stream download chunking for a ~2x speed improvement
+- Link preconnect — hovering a link opens its connection before you click, as does landing on a sign-in redirect
 - Learned suggestions — tiny local neural net that suggests sites you usually visit at this time
 - Bookmarks bar — folders, drag to move, ⇧⌘B to toggle
 - Ad & tracker blocking — native WebKit rules with curated ~65-domain blocklist
@@ -19,14 +20,16 @@ seconds with `swiftc`.
 - Search suggestions — bookmarks/history/search engine with usage-based ranking
 - History window — searchable, grouped by date (⌘Y)
 - Session restore — optional, with ⇧⌘T surviving restart
+- Value watching — watch a price on a page and get told when it moves ([details](#watching-a-value))
 - Password manager — Secure Enclave vault, Touch ID autofill, CSV import ([details](#passwords))
 - Downloads viewer — progress bar, speed, VirusTotal scanning (hash-only by default)
+- Tab activity — what each tab costs in CPU and memory, asked of the kernel rather than guessed
 - Private windows — ⇧⌘N with ephemeral data store
 - Persistent logins — via WebKit's persistent cookie store
 - Back/forward — toolbar buttons, ⌘[ / ⌘], and two-finger swipe
 - Popup handling — `target=_blank` and `window.open` open as tabs
 - Page zoom — ⌘+ / ⌘− / ⌘0
-- Web Inspector — right-click → Inspect Element
+- Web Inspector — right-click → Inspect Element, plus a Develop menu (⌥⌘I, console, view source, hard reload)
 - Default browser capable — register as http/https handler
 - No backspace navigation — Delete key doesn't trigger "go back"
 
@@ -104,6 +107,36 @@ Now, the autofill and save toggles, Lock After, and Change/Restore Recovery Key.
 Note on Apple's own passwords: Apple does not expose Passwords/iCloud Keychain autofill
 to third-party browsers on macOS — it's wired into Safari, not into WKWebView, and
 there is no public API for it through macOS 26/27. Importing the CSV is the way across.
+
+## Watching a value
+
+Select a price on a page, then Tools → Watches → **Watch This Value…** and pick how often
+to check: hourly, every six hours, or daily. Rocket reloads the page on its own, reads the
+same element, and marks the watch when the value moves. A change puts a count on the Dock
+icon and an arrow beside the value in the Watches menu. Each watch's own submenu holds the
+old value, when it was last checked, and items to open the page, recheck it now, or stop
+watching. Opening the menu counts as having seen it and clears the badge.
+
+If something moved while Rocket was closed, the next launch says so in a small panel in
+the corner of the window: the new value, what it used to be, and a click to open the page.
+Each change is announced once, so quitting and reopening doesn't hand you the same news
+again, and opening the Watches menu instead is enough to have seen it.
+
+Numbers are compared as numbers, so `$30` becoming `30.00 USD` is not news, while
+`$1,299.00` becoming `$1,199.00` is a ▼ and a difference of $100. European formats read
+correctly: `1.299,00 €` is the same money as `$1,299.00`. Anything that doesn't parse as a
+number is compared as text, which is what catches "In stock" turning into "Sold out".
+
+The check loads the page in a web view you never see, using your normal cookies, so a site
+that shows you a member price shows Rocket the same one. Loading it rather than fetching
+the HTML is deliberate: most prices are written in by script and aren't in the markup at
+all. For the same reason the value is read only once it stops changing — a page that fills
+its price in a second late hands you "loading…" if you read too early. The element is
+pinned when you create the watch, and Rocket refuses the watch outright if it can't find
+its way back to exactly what you selected, rather than watch the wrong thing for a week.
+
+Checks run one at a time and never faster than hourly. Watching is offered in normal
+windows only; a private window has nothing it should be writing down.
 
 ## Distributing a build
 

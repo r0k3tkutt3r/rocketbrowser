@@ -86,7 +86,16 @@ final class BrowserWindowController: NSWindowController {
         if preferences.responds(to: NSSelectorFromString("_setBackspaceKeyNavigationEnabled:")) {
             preferences.setValue(false, forKey: "backspaceKeyNavigationEnabled")
         }
-        self.webView = WKWebView(frame: .zero, configuration: configuration)
+        // What actually turns the Web Inspector on. `isInspectable` alone only publishes
+        // the view to Safari's Develop menu — measured: without this, `_WKInspector`
+        // reports isConnected 0 and `show()` silently does nothing. Applied to every
+        // configuration, popups included, so Develop works in whatever tab you are in.
+        if preferences.responds(to: NSSelectorFromString("_setDeveloperExtrasEnabled:")) {
+            preferences.setValue(true, forKey: "developerExtrasEnabled")
+        }
+        // RocketWebView only exists to guarantee the right-click Inspect Element item;
+        // popups come through this initializer too, so they get it as well.
+        self.webView = RocketWebView(frame: .zero, configuration: configuration)
         self.incognitoSession = incognitoSession
         incognitoSession?.attach()
         let isPrivate = incognitoSession != nil
@@ -1001,6 +1010,16 @@ extension BrowserWindowController: NSMenuItemValidation {
             return isFindBarVisible || !findBar.field.stringValue.isEmpty
         case #selector(hideFindBar(_:)):
             return isFindBarVisible
+        case #selector(showWebInspector(_:)):
+            menuItem.title = inspectorIsVisible ? "Close Web Inspector" : "Show Web Inspector"
+            return inspector != nil
+        case #selector(showJavaScriptConsole(_:)), #selector(inspectElement(_:)):
+            return inspector != nil
+        case #selector(viewPageSource(_:)):
+            return webView.url != nil && !NewTabPage.isInternalURL(webView.url)
+        case #selector(watchSelectedValue(_:)):
+            // Never in incognito: a watch is a URL written to disk and reloaded for days.
+            return !isPrivate && webView.url != nil && !NewTabPage.isInternalURL(webView.url)
         case #selector(toggleBookmark(_:)):
             guard let urlString = webView.url?.absoluteString,
                   !urlString.isEmpty, urlString != "about:blank",
@@ -1168,6 +1187,9 @@ extension BrowserWindowController: WKNavigationDelegate {
               let url = webView.url,
               let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme) else { return }
         currentVisitID = HistoryStore.shared.record(url: url, viaRedirect: viaRedirect)
+        // A sign-in hop is the one place where the next host is both predictable and
+        // worth connecting to early; everywhere else this is a no-op.
+        if let host = url.host { WaypointPreconnect.preconnect(from: webView, on: host) }
     }
 
     /// A server 3xx always means this page was a hop, never a destination the user chose.
@@ -1354,6 +1376,164 @@ extension BrowserWindowController {
                 NewTabPage.open(in: self.webView)
             }
         }
+    }
+}
+
+// MARK: - Develop
+
+extension BrowserWindowController {
+
+    /// WebKit ships no public way to open the inspector — only the context menu item
+    /// does — so the Develop menu goes through `_WKInspector`, guarded the same way as
+    /// the backspace preference. Losing the private class costs the menu, not the tab.
+    private var inspector: NSObject? {
+        guard webView.responds(to: NSSelectorFromString("_inspector")) else { return nil }
+        return webView.value(forKey: "_inspector") as? NSObject
+    }
+
+    private var inspectorIsVisible: Bool {
+        guard let inspector, inspector.responds(to: NSSelectorFromString("isVisible")) else { return false }
+        return (inspector.value(forKey: "isVisible") as? Bool) ?? false
+    }
+
+    private func callInspector(_ name: String) {
+        let selector = NSSelectorFromString(name)
+        guard let inspector, inspector.responds(to: selector) else { return }
+        inspector.perform(selector)
+    }
+
+    /// Toggles, the way ⌥⌘I does in Safari.
+    @objc func showWebInspector(_ sender: Any?) {
+        callInspector(inspectorIsVisible ? "close" : "show")
+    }
+
+    /// The right-click item. Separate from the toggle above on purpose: menu validation
+    /// renames that one to "Close Web Inspector" while the inspector is open, which is
+    /// right for ⌥⌘I and wrong for a context menu that says Inspect Element.
+    @objc func inspectElement(_ sender: Any?) {
+        callInspector("show")
+    }
+
+    @objc func showJavaScriptConsole(_ sender: Any?) {
+        callInspector("showConsole")
+    }
+
+    @objc func reloadIgnoringCache(_ sender: Any?) {
+        webView.reloadFromOrigin()
+    }
+
+    /// Opens the page's markup in a new tab. This is the live DOM, not the bytes the
+    /// server sent — which is the useful answer when a script wrote half the page, and
+    /// worth knowing when it isn't, so the header says so.
+    @objc func viewPageSource(_ sender: Any?) {
+        guard let url = webView.url, !NewTabPage.isInternalURL(url) else { return }
+        webView.callAsyncJavaScript("return document.documentElement.outerHTML;",
+                                    in: nil, in: .defaultClient) { [weak self] result in
+            guard let self, case .success(let raw) = result, let html = raw as? String else { return }
+            self.openSourceTab().showSource(html, of: url)
+        }
+    }
+
+    /// `openInNewTab(nil)` cannot be used here: it starts the new tab page loading, and
+    /// the source that follows loses the race against it — the tab ends up showing the
+    /// start page. This opens the same tab without giving it anything to load first.
+    private func openSourceTab() -> BrowserWindowController {
+        let configuration = webView.configuration.copy() as! WKWebViewConfiguration
+        let controller = BrowserWindowController(configuration: configuration,
+                                                 incognitoSession: incognitoSession)
+        AppDelegate.shared.register(controller)
+        attachAsTab(controller)
+        return controller
+    }
+
+    func showSource(_ html: String, of url: URL) {
+        let page = """
+        <!doctype html>
+        <meta charset="utf-8">
+        <meta name="color-scheme" content="light dark">
+        <title>Source of \(htmlEscaped(url.absoluteString))</title>
+        <style>
+            body { margin: 0; }
+            header { position: sticky; top: 0; padding: 8px 12px; background: Canvas;
+                     border-bottom: 1px solid GrayText; opacity: 0.85;
+                     font: 12px -apple-system, sans-serif; word-break: break-all; }
+            pre { margin: 0; padding: 12px; white-space: pre-wrap; word-break: break-word;
+                  font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+        </style>
+        <header>Live DOM source of \(htmlEscaped(url.absoluteString))</header>
+        <pre>\(htmlEscaped(html))</pre>
+        """
+        suppressHistoryOnce = true
+        webView.loadHTMLString(page, baseURL: nil)
+        window?.makeFirstResponder(webView)
+    }
+}
+
+// MARK: - Watched values
+
+extension BrowserWindowController {
+
+    /// Turns the current selection into a watched value. What gets watched is the whole
+    /// element's text rather than the characters that happened to be highlighted — the
+    /// later checks read the element — so the confirmation shows what Rocket will
+    /// actually be reading, not what the mouse dragged over.
+    @objc func watchSelectedValue(_ sender: Any?) {
+        guard let window, !isPrivate, let url = webView.url, !NewTabPage.isInternalURL(url) else { return }
+        webView.callAsyncJavaScript(PageWatchChecker.captureScript,
+                                    in: nil, in: .defaultClient) { [weak self] result in
+            guard let self else { return }
+            guard case .success(let raw) = result, let body = raw as? [String: Any],
+                  body["ok"] as? Bool == true,
+                  let selector = body["selector"] as? String, !selector.isEmpty,
+                  let value = body["value"] as? String, !value.isEmpty else {
+                self.presentWatchRefusal(in: window)
+                return
+            }
+            self.confirmWatch(url: url, title: (body["title"] as? String) ?? "",
+                              selector: selector, value: value, in: window)
+        }
+    }
+
+    private func confirmWatch(url: URL, title: String, selector: String,
+                              value: String, in window: NSWindow) {
+        let alert = NSAlert()
+        alert.messageText = "Watch this value?"
+        alert.informativeText = """
+        Rocket will reload \(url.host ?? url.absoluteString) in the background on its own \
+        and tell you when this changes:
+
+        \(value.prefix(140))
+        """
+        alert.addButton(withTitle: "Watch")
+        alert.addButton(withTitle: "Cancel")
+        let interval = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 220, height: 25))
+        interval.addItems(withTitles: PageWatch.intervals.map(\.title))
+        interval.selectItem(at: 1)
+        alert.accessoryView = interval
+        alert.beginSheetModal(for: window) { response in
+            guard response == .alertFirstButtonReturn else { return }
+            let name = title.trimmingCharacters(in: .whitespacesAndNewlines)
+            PageWatchStore.shared.add(PageWatch(
+                url: url.absoluteString,
+                host: url.host ?? "",
+                title: name.isEmpty ? (url.host ?? url.absoluteString) : name,
+                selector: selector,
+                value: value,
+                interval: PageWatch.intervals[interval.indexOfSelectedItem].seconds,
+                // Stamped as just-checked: the value on screen *is* this check.
+                checkedAt: Date()))
+        }
+    }
+
+    private func presentWatchRefusal(in window: NSWindow) {
+        let alert = NSAlert()
+        alert.messageText = "Nothing to watch here"
+        alert.informativeText = """
+        Select the value you want watched — a price, a stock line, a number — and try \
+        again. Rocket also has to be able to find that exact spot on the page days from \
+        now, and it could not pin down this selection.
+        """
+        alert.beginSheetModal(for: window)
     }
 }
 

@@ -82,6 +82,87 @@ Do NOT reuse `WaypointDetector` to filter address-bar suggestions. Its false pos
 
 `AppDelegate.previousSession` MUST stay an in-memory copy read once at launch. The live session overwrites `session.json` within seconds of starting up, so re-reading disk for "Reopen Last Session" would hand back the empty tab the user is looking at — the command would appear to work and do nothing.
 
+**Tab cost is measured, not modelled.** `TabActivity` asks the kernel what a tab's web
+content process is really doing — `proc_pid_rusage` for cumulative CPU and physical
+footprint — sampled by one 30-second timer in `AppDelegate`, because a rate is the
+difference between two samples and a menu opened cold has only one. The pid comes from
+the private `_webProcessIdentifier` read through KVC behind `responds(to:)`, the same
+shape as the backspace preference. Tools ▸ Tab Activity rebuilds from those readings,
+worst first, and touches no page: polling a background tab's DOM would wake the very
+process it is reporting on. Bytes transferred are deliberately absent — WebKit zeroes
+`transferSize` for cross-origin resources without `Timing-Allow-Origin`, so the only
+available number undercounts exactly the heavy pages. WebKit runs one process per *site*,
+so tabs sharing a site report one set of figures between them, marked "(shared)".
+
+**Sign-in hops are preconnected, never prefetched.** `WaypointPreconnect` warms the
+TCP+TLS connection to the host that usually follows a waypoint. The *URL* an OAuth
+redirector will produce is unknowable to the browser — it depends on the server's session
+— but the host is learned from consecutive visits in your own history (≥3 observations,
+≥50% share, within 5 minutes), and a connection is all the next hop needs early. It rides
+on `rel="preconnect"`, WebKit's own primitive: measured against a local listener it opens
+the TCP connection and sends no request bytes. Gated on `WaypointDetector`'s flags, whose
+set is cached for 10 minutes because `analyze` parses every URL in the history. The host
+travels as a `callAsyncJavaScript` argument in `.defaultClient`, never spliced into
+source. Never in incognito — the prediction is drawn from normal browsing, and connecting
+on its say-so would carry that history's shape into a private session. The same file
+carries the half that fires far more often: `hoverScript` warms a link's origin after the
+pointer rests on it for 120 ms, capped at 12 origins per page and skipping the page's own
+origin. That one lives entirely in the page — the decision needs nothing native, and a
+message handler would add latency to a feature whose purpose is removing it — and it is
+gated on `isTrusted` like every autofill listener, so a page cannot forge hovers to make
+Rocket connect somewhere (verified: a forged `mouseover` reaches the listener and warms
+nothing). It is out of incognito for a plainer reason than the redirect half: "I looked at
+this link" is exactly what a private window must not tell a host.
+
+**The Develop menu drives the inspector through private API, because there is no other
+door.** `isInspectable` only publishes the view to Safari's Develop menu; it does not let
+the app open the inspector itself, and measured, `_WKInspector.show()` on a view with
+`isInspectable` alone does nothing at all — `isConnected` stays 0. The switch that matters
+is the private `developerExtrasEnabled` preference, set in `BrowserWindowController.init`
+beside the backspace preference so popups get it too. With it on, `show`, `showConsole`
+and `close` all work, and ⌥⌘I toggles the way Safari's does. "View Page Source" serialises
+`document.documentElement.outerHTML` into a new tab as escaped text — the live DOM, not
+the bytes the server sent, which the page's own header says out loud. That tab is opened
+by `openSourceTab`, not `openInNewTab(nil)`: the latter starts the new tab page loading
+and the source loses the race against it, leaving you looking at the start page.
+
+Right-click ▸ Inspect Element is guaranteed rather than assumed. WebKit adds that item
+itself once developer extras are on, but its context menu is built in the web process and
+cannot be opened or read from a test — a synthetic right-click produces an empty menu — so
+`RocketWebView` (the only reason that subclass exists) overrides `willOpenMenu` and adds
+the item when the menu does not already offer one, matching WebKit's by identifier as well
+as by title so a localized build is not double-counted. WebKit's own item is left alone
+where it exists, because it inspects the exact element under the pointer and an appended
+item cannot. The item uses `inspectElement`, not the ⌥⌘I `showWebInspector` toggle:
+validation rewrites that one's title to "Close Web Inspector" while the inspector is open,
+which is right for a menu bar and wrong for a right-click.
+
+**Watched values are read by loading the page, not by scraping it.** A price is almost
+always written in by script, so `PageWatchChecker` loads the page in a `WKWebView` that
+never appears on screen — against the normal data store, so the page shows *your*
+session's price — and reads the element with `innerText` (which is why that view has a
+real size even though nothing draws it). The element is pinned by a CSS path built from
+the selection at the moment the watch is made, and the watch is refused unless that path
+selects back to exactly the node highlighted, which `captureScript` reports as `ok`. Two
+things make a single read worthless: WebKit throttles off-screen views hard, and pages
+show a placeholder before the real number — reading once after `didFinish` returns
+"loading…", which is how the first version of this failed its own test. So the value is
+polled until two consecutive reads agree *and* `settleFloor` has passed. Checks run
+strictly one at a time and no watch may be faster than hourly; this is a background
+errand, not a crawl. A change sets `unread`, which is the Dock badge, and opening
+Tools ▸ Watches is what counts as having looked. The badge and a Dock bounce are the
+notification on purpose: `UNUserNotificationCenter` wants a registered bundle and raises
+rather than failing without one, which is a poor trade for a badge. A badge is also easy
+to miss on an icon you have just clicked, so launch opens a popover in the front window
+for anything that moved while Rocket was closed. What it shows is `PageWatch.unannounced`:
+still `unread` *and* changed since the `WatchesAnnouncedAt` stamp, the first condition so
+the menu silences it and the second so quitting twice does not deliver the same news
+twice. Showing it writes the stamp and deliberately does not mark anything read —
+dismissing a popover is not reading the list, and the ● marks carry the news for the
+rest of the run. `watchNotificationPopover(for:)` takes the watches it renders instead of
+reading the store, which is what lets a harness build and open it with no browser window
+and no watches.json anywhere near it.
+
 **Browser-install promos are matched by shape, not by selector.** `PromoBlocker` strips "install Chrome" cards from Google's services. Google rotates those class names and ids constantly, so it instead looks for a card-sized block (≤400 characters, climbing at most 8 ancestors) that either links to a Chrome install URL or carries a high-precision pitch phrase *and* owns a button. The ancestor cap is the guard that keeps it from eating an article that merely discusses Chrome, and it no-ops entirely on Google's real Chrome download pages. Its `MutationObserver` sweeps on a `setTimeout`, not `requestAnimationFrame` — rAF is suspended for non-rendering views, so promos in background tabs survived.
 
 **Passwords are enclave-gated; the index deliberately is not.** `PasswordStore` keeps two encryption tiers in `passwords.vault`. Secrets (passwords, notes, OTP seeds) sit under a vault key K that only opens through a Secure Enclave key created with `.userPresence` — every use needs Touch ID or the macOS password, enforced by the enclave itself rather than by app code. The site/username index sits under a second key Ki that a *silent* enclave key opens with no prompt. That asymmetry is the whole design: it is what lets the dropdown and the manager list accounts before you authenticate, the way Chrome and Safari do. The index is still unreadable off this Mac, and local malware learning site+username pairs was accepted because `history.json` already exposes every site in plain text. K is additionally wrapped under a PBKDF2-stretched recovery key (shown once at setup), which is the only way into the vault on another Mac; `needsRestore` is set when the *silent* wrap fails to open, because that is the one check that needs no prompt. `mutate`/`withSecrets` are the only path to K. `markUsed` touches the index only and must stay prompt-free.
@@ -129,4 +210,21 @@ Field rectangles arrive as CSS pixels plus the top-level viewport width, and the
 - The recovery key is Crockford base32 without I, L, O or U, and `RecoveryKey.normalize` maps O→0 and I/L→1, so a key transcribed from paper still decodes. It is also case- and separator-insensitive.
 - Anything showing decrypted text listens for `.passwordsDidLock` and clears. Wiping the vault key while a revealed password, its notes and its one-time-code seed are still on screen protects nothing; the manager also clears when Rocket stops being the active app.
 - Known and accepted, so nobody re-discovers them as bugs: the vault has no rollback protection (an attacker who can write the file can restore an older authentic one — AES-GCM proves integrity, not freshness); the clipboard's concealed marker is advisory, not enforced by the OS; `isInspectable` is on, which is a deliberate product decision for a personal browser but does expose page DOM, including a filled password, to Web Inspector; and `.userPresence` is used rather than `.biometryCurrentSet` on purpose — the stricter flag would invalidate the vault key whenever a fingerprint is enrolled or removed, destroying the vault for anyone without their recovery key.
+- A whole-app harness (`swiftc Sources/*.swift` minus `main.swift`, plus your own
+  `main.swift`) is the way to exercise anything that needs a real `BrowserWindowController`
+  — but it writes to the **real** `~/Library/Application Support/Rocket/`, because
+  `FileManager.urls(for: .applicationSupportDirectory)` ignores `$HOME`. Redirecting HOME
+  does nothing. Pass an explicit `fileURL:` to the stores you touch, and set
+  `UserDefaults.standard.set(false, forKey: "SuggestionsEnabled")` first, which is the
+  gate `didFinish` checks before recording history. Skipping that put two junk visits in
+  a real history file.
+- Tab hibernation (discard an idle background tab, reload it on focus) was measured and
+  abandoned; the numbers are here so nobody builds it twice. An offscreen `WKWebView`
+  already costs ~0% CPU — WebKit suspends non-visible views on its own — and its memory
+  is not reclaimable through public API: loading `about:blank` over a page holding an
+  8M-element JS array left the web process at 71.6 MB, still 71.0 MB after a second
+  navigation and eight idle seconds, and releasing the `WKWebView` outright did not end
+  the process either. `interactionState` does round-trip a tab perfectly (restoring it
+  sets the URL and begins loading synchronously, back/forward list intact) — it just buys
+  nothing here. Use Tab Activity to see what a tab actually costs before optimising it.
 - All user data lives in `~/Library/Application Support/Rocket/` (`bookmarks.json`, `history.json`, `session.json`, `suggestions.json`, `passwords.vault`, `newtab.html`, `wallpaper-*`). The vault is written atomically at mode 0600. Wallpaper files get a timestamped name on every change for cache busting.

@@ -1,4 +1,41 @@
 import Cocoa
+import WebKit
+
+/// The web view Rocket uses everywhere, subclassed for one reason: to guarantee that a
+/// right-click offers Inspect Element.
+///
+/// WebKit adds that item itself once developer extras are on, but its menu is built
+/// asynchronously in the web process and cannot be driven or inspected from a test, so
+/// "it should be there" was as far as checking could go. This makes it certain: if
+/// WebKit's own item is present it is left alone — that one inspects the exact element
+/// under the pointer, which an appended item cannot do — and otherwise Rocket adds its
+/// own, which opens the inspector.
+final class RocketWebView: WKWebView {
+
+    /// True when the menu already offers to inspect, whether by WebKit's identifier or
+    /// by the localized title.
+    static func offersInspect(_ menu: NSMenu) -> Bool {
+        menu.items.contains { item in
+            item.identifier?.rawValue.localizedCaseInsensitiveContains("inspect") == true
+                || item.title.localizedCaseInsensitiveContains("inspect")
+        }
+    }
+
+    static func addInspectItem(to menu: NSMenu) {
+        guard !offersInspect(menu) else { return }
+        if !menu.items.isEmpty { menu.addItem(.separator()) }
+        // nil target: the responder chain reaches the window's BrowserWindowController,
+        // the same way every other Rocket menu item is handled.
+        menu.addItem(withTitle: "Inspect Element",
+                     action: #selector(BrowserWindowController.inspectElement(_:)),
+                     keyEquivalent: "")
+    }
+
+    override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {
+        super.willOpenMenu(menu, with: event)
+        Self.addInspectItem(to: menu)
+    }
+}
 
 /// Address bar text field that selects its contents when focused (Safari-style).
 final class URLField: NSTextField {

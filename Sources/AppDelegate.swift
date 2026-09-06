@@ -19,6 +19,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     private let suggestionsMenu = NSMenu(title: "New Tab Suggestions")
     private let securityMenu = NSMenu(title: "Download Scanning")
     private let passwordsMenu = NSMenu(title: "Passwords")
+    private let activityMenu = NSMenu(title: "Tab Activity")
+    private let watchesMenu = NSMenu(title: "Watches")
+    /// The launch notification for changed watches, held while it is on screen.
+    private var watchPopover: NSPopover?
     /// Recently closed tabs, newest last — the ⇧⌘T stack.
     private var closedTabs: [(url: URL, title: String?)] = []
     /// The session as it was at launch, read once and kept.
@@ -72,6 +76,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         SuggestionEngine.shared.retrainIfDue { [weak self] trained in
             if trained { self?.reloadNewTabPages() }
         }
+        // A few syscalls per tab. It has to run whether or not anyone is looking,
+        // because a CPU rate is a difference between two samples.
+        let sampler = Timer.scheduledTimer(withTimeInterval: TabActivity.sampleInterval,
+                                           repeats: true) { [weak self] _ in
+            guard let self else { return }
+            TabActivity.refresh(pids: self.controllers.compactMap { TabActivity.processID(of: $0.webView) })
+        }
+        sampler.tolerance = 10
+
+        // Watched values. The timer only decides *when* a watch is due; the interval
+        // that matters is the per-watch one, and the shortest of those is an hour.
+        let watcher = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { _ in
+            PageWatchChecker.shared.checkDue()
+        }
+        watcher.tolerance = 60
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
+            PageWatchChecker.shared.checkDue()
+        }
+        NotificationCenter.default.addObserver(forName: .watchesDidChange, object: nil, queue: .main) { _ in
+            let unread = PageWatchStore.shared.unreadCount
+            NSApp.dockTile.badgeLabel = unread > 0 ? "\(unread)" : nil
+        }
+        let unread = PageWatchStore.shared.unreadCount
+        NSApp.dockTile.badgeLabel = unread > 0 ? "\(unread)" : nil
+
         previousSession = SessionStore.shared.load()
         // ⇧⌘T picks up where the last run left off, not from an empty stack.
         closedTabs = (previousSession?.closedTabs ?? []).compactMap { tab in
@@ -87,6 +116,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         // Don't steal focus when launched hidden (e.g. `open -gj` for background testing).
         if !NSApp.isHidden {
             NSApp.activate()
+        }
+        // After the window is actually on screen: a popover has nothing to hang from
+        // until then.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.announceWatchChanges()
         }
     }
 
@@ -644,7 +678,234 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
             rebuildSecurityMenu()
         } else if menu === passwordsMenu {
             rebuildPasswordsMenu()
+        } else if menu === activityMenu {
+            rebuildActivityMenu()
+        } else if menu === watchesMenu {
+            rebuildWatchesMenu()
         }
+    }
+
+    /// Every watched value, changed ones first. Opening this menu is what counts as
+    /// having looked: the unread marks and the Dock badge clear on the way out.
+    private func rebuildWatchesMenu() {
+        watchesMenu.removeAllItems()
+        let create = watchesMenu.addItem(withTitle: "Watch This Value…",
+                                         action: #selector(BrowserWindowController.watchSelectedValue(_:)),
+                                         keyEquivalent: "")
+        create.toolTip = "Select a price or other value on the page first."
+        let watches = PageWatchStore.shared.watches.sorted {
+            ($0.unread ? 1 : 0, $0.changedAt ?? .distantPast) > ($1.unread ? 1 : 0, $1.changedAt ?? .distantPast)
+        }
+        guard !watches.isEmpty else { return }
+
+        watchesMenu.addItem(.separator())
+        let relative = RelativeDateTimeFormatter()
+        for watch in watches {
+            let arrow = watch.previousValue.flatMap {
+                WatchValue.marker(for: WatchValue.compare(old: $0, new: watch.value))
+            }
+            let name = watch.title.isEmpty ? watch.host : watch.title
+            let parent = watchesMenu.addItem(
+                withTitle: (watch.unread ? "● " : "") + (arrow.map { "\($0) " } ?? "")
+                    + "\(watch.value.prefix(32))  —  \(name.prefix(40))",
+                action: nil, keyEquivalent: "")
+
+            let submenu = NSMenu(title: name)
+            let detail: String
+            if watch.missingSince != nil {
+                detail = "Couldn’t find this value on the page"
+            } else if let previous = watch.previousValue {
+                detail = "Was \(previous.prefix(32))"
+            } else {
+                detail = "No change yet"
+            }
+            submenu.addItem(withTitle: detail, action: nil, keyEquivalent: "").isEnabled = false
+            if let checked = watch.checkedAt {
+                let when = relative.localizedString(for: checked, relativeTo: Date())
+                submenu.addItem(withTitle: "Checked \(when)", action: nil, keyEquivalent: "").isEnabled = false
+            }
+            submenu.addItem(.separator())
+            for (title, action) in [("Open Page", #selector(openWatch(_:))),
+                                    ("Check Now", #selector(checkWatchNow(_:))),
+                                    ("Stop Watching", #selector(stopWatching(_:)))] {
+                let item = submenu.addItem(withTitle: title, action: action, keyEquivalent: "")
+                item.representedObject = watch.id
+                item.target = self
+            }
+            watchesMenu.setSubmenu(submenu, for: parent)
+        }
+        watchesMenu.addItem(.separator())
+        watchesMenu.addItem(withTitle: "Check All Now",
+                            action: #selector(checkAllWatches(_:)), keyEquivalent: "").target = self
+        PageWatchStore.shared.markAllRead()
+    }
+
+    @objc func openWatch(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? UUID else { return }
+        openWatch(id: id)
+    }
+
+    private func openWatch(id: UUID) {
+        guard let watch = PageWatchStore.shared.watch(id: id),
+              let url = URL(string: watch.url) else { return }
+        if let front = frontNormalBrowserController {
+            front.openInNewTab(url)
+        } else {
+            openNewWindow(url: url)
+        }
+    }
+
+    /// The launch nudge: a popover in the front window when a watched value moved while
+    /// Rocket was closed. The Dock badge is already there, but nobody inspects the Dock
+    /// icon they have just clicked, which is exactly when the news is wanted.
+    ///
+    /// It deliberately does NOT mark anything read — dismissing a popover is not the same
+    /// as having looked at the list, and the ● marks in Tools ▸ Watches are what carry the
+    /// news the rest of the run. The announcement stamp is what keeps it from repeating.
+    private func announceWatchChanges() {
+        let announced = UserDefaults.standard.object(forKey: "WatchesAnnouncedAt") as? Date ?? .distantPast
+        let changed = PageWatch.unannounced(in: PageWatchStore.shared.watches, since: announced)
+        guard !changed.isEmpty, let anchor = frontNormalBrowserController?.window?.contentView else { return }
+        UserDefaults.standard.set(Date(), forKey: "WatchesAnnouncedAt")
+
+        let popover = watchNotificationPopover(for: changed)
+        // Top-right of the page area, the same corner the save bubble falls back to.
+        popover.show(relativeTo: NSRect(x: anchor.bounds.maxX - 80, y: anchor.bounds.maxY - 1,
+                                        width: 32, height: 1),
+                     of: anchor, preferredEdge: .maxY)
+        watchPopover = popover
+    }
+
+    /// The notification itself: a heading, one clickable row per changed watch, and what
+    /// the value used to be under each. Separate from the launch check above so it can be
+    /// built and inspected without an app around it.
+    func watchNotificationPopover(for changed: [PageWatch]) -> NSPopover {
+        let heading = NSTextField(labelWithString: changed.count == 1
+            ? "A watched value changed" : "\(changed.count) watched values changed")
+        heading.font = .systemFont(ofSize: 13, weight: .semibold)
+        var rows: [NSView] = [heading]
+        for watch in changed.prefix(5) {
+            let arrow = watch.previousValue.flatMap {
+                WatchValue.marker(for: WatchValue.compare(old: $0, new: watch.value))
+            } ?? "•"
+            let name = watch.title.isEmpty ? watch.host : watch.title
+            let row = NSButton(title: "", target: self, action: #selector(openWatchFromNotification(_:)))
+            row.isBordered = false
+            row.alignment = .left
+            row.attributedTitle = NSAttributedString(
+                string: "\(arrow) \(watch.value.prefix(24))  —  \(name.prefix(36))",
+                attributes: [.foregroundColor: NSColor.linkColor, .font: NSFont.systemFont(ofSize: 12)])
+            row.cell?.representedObject = watch.id
+            rows.append(row)
+            if let previous = watch.previousValue {
+                let was = NSTextField(labelWithString: "Was \(previous.prefix(24))")
+                was.font = .systemFont(ofSize: 11)
+                was.textColor = .secondaryLabelColor
+                rows.append(was)
+            }
+        }
+
+        let stack = NSStackView(views: rows)
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 6
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 0))
+        container.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: container.topAnchor, constant: 16),
+            stack.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -16),
+            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -16),
+        ])
+        stack.layoutSubtreeIfNeeded()
+        let content = NSViewController()
+        content.view = container
+        content.preferredContentSize = NSSize(width: 320, height: stack.fittingSize.height + 32)
+
+        let popover = NSPopover()
+        popover.contentViewController = content
+        popover.behavior = .transient
+        return popover
+    }
+
+    @objc private func openWatchFromNotification(_ sender: NSButton) {
+        watchPopover?.performClose(nil)
+        guard let id = sender.cell?.representedObject as? UUID else { return }
+        openWatch(id: id)
+    }
+
+    @objc func checkWatchNow(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? UUID else { return }
+        PageWatchChecker.shared.check(ids: [id])
+    }
+
+    @objc func stopWatching(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? UUID else { return }
+        PageWatchStore.shared.remove(id: id)
+    }
+
+    @objc func checkAllWatches(_ sender: Any?) {
+        PageWatchChecker.shared.check(ids: PageWatchStore.shared.watches.map(\.id))
+    }
+
+    /// One row per tab, worst offender first. Rebuilt on open from the sampler's last
+    /// readings — nothing here touches the pages themselves, so opening this menu cannot
+    /// wake the very background tabs it is reporting on.
+    private func rebuildActivityMenu() {
+        activityMenu.removeAllItems()
+        let tabs = controllers.map { (controller: $0, pid: TabActivity.processID(of: $0.webView)) }
+        guard !tabs.isEmpty else {
+            activityMenu.addItem(withTitle: "No Open Tabs", action: nil, keyEquivalent: "").isEnabled = false
+            return
+        }
+        var tabsPerProcess: [pid_t: Int] = [:]
+        for pid in tabs.compactMap(\.pid) { tabsPerProcess[pid, default: 0] += 1 }
+
+        let rows = tabs.map { tab in
+            (controller: tab.controller,
+             reading: tab.pid.flatMap { TabActivity.reading(for: $0) },
+             shared: tab.pid.map { tabsPerProcess[$0, default: 0] > 1 } ?? false)
+        }.sorted {
+            ($0.reading?.cpuPercent ?? -1, $0.reading?.memoryBytes ?? 0)
+                > ($1.reading?.cpuPercent ?? -1, $1.reading?.memoryBytes ?? 0)
+        }
+
+        for row in rows {
+            // An incognito tab's page title has no business in a menu that lists it.
+            let name = row.controller.isPrivate
+                ? "Incognito"
+                : (row.controller.webView.title ?? row.controller.webView.url?.host ?? "New Tab")
+            let item = activityMenu.addItem(
+                withTitle: "\(TabActivity.describe(row.reading))\(row.shared ? " (shared)" : "")"
+                    + "  —  \(name.prefix(48))",
+                action: #selector(focusTab(_:)), keyEquivalent: "")
+            item.representedObject = row.controller
+            item.target = self
+        }
+        if rows.contains(where: \.shared) {
+            activityMenu.addItem(.separator())
+            let note = activityMenu.addItem(
+                withTitle: "Tabs on one site share a web process, and its figures.",
+                action: nil, keyEquivalent: "")
+            note.isEnabled = false
+        }
+    }
+
+    @objc func focusTab(_ sender: NSMenuItem) {
+        guard let controller = sender.representedObject as? BrowserWindowController,
+              controllers.contains(where: { $0 === controller }),
+              let window = controller.window else { return }
+        window.tabGroup?.selectedWindow = window
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate()
+    }
+
+    /// Reapplies scripts the way the other script-backed toggles do: the hover half of
+    /// this feature is a user script, so flipping it has to reach the open tabs.
+    @objc func togglePreconnect(_ sender: Any?) {
+        WaypointPreconnect.isEnabled.toggle()
+        ContentBlocker.shared.applyToAllWebViews?()
     }
 
     /// Rebuilt on open because the last item flips between "Change Recovery Key" and
@@ -985,6 +1246,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         main.addItem(bookmarksItem)
         rebuildBookmarksMenu()
 
+        // Develop: commands for the page in front of you, kept out of View because a
+        // browser's inspector lives in its own menu everywhere else.
+        let developMenu = addSubmenu("Develop", to: main)
+        let inspectorItem = developMenu.addItem(
+            withTitle: "Show Web Inspector",
+            action: #selector(BrowserWindowController.showWebInspector(_:)), keyEquivalent: "i")
+        inspectorItem.keyEquivalentModifierMask = [.command, .option]
+        let consoleItem = developMenu.addItem(
+            withTitle: "Show JavaScript Console",
+            action: #selector(BrowserWindowController.showJavaScriptConsole(_:)), keyEquivalent: "c")
+        consoleItem.keyEquivalentModifierMask = [.command, .option]
+        developMenu.addItem(.separator())
+        let sourceItem = developMenu.addItem(
+            withTitle: "View Page Source",
+            action: #selector(BrowserWindowController.viewPageSource(_:)), keyEquivalent: "u")
+        sourceItem.keyEquivalentModifierMask = [.command, .option]
+        let hardReload = developMenu.addItem(
+            withTitle: "Reload Ignoring Cache",
+            action: #selector(BrowserWindowController.reloadIgnoringCache(_:)), keyEquivalent: "R")
+        hardReload.keyEquivalentModifierMask = [.command, .shift]
+
         // Tools: everything that changes how Rocket behaves, as opposed to the View
         // menu's commands for the page currently on screen.
         let toolsMenu = addSubmenu("Tools", to: main)
@@ -1006,6 +1288,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         toolsMenu.addItem(withTitle: "Search Text in Images",
                           action: #selector(toggleImageTextSearch(_:)),
                           keyEquivalent: "")
+        toolsMenu.addItem(withTitle: "Speed Up Links and Redirects",
+                          action: #selector(togglePreconnect(_:)),
+                          keyEquivalent: "")
         toolsMenu.addItem(withTitle: "Restore Tabs on Launch",
                           action: #selector(toggleSessionRestore(_:)),
                           keyEquivalent: "")
@@ -1021,6 +1306,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         toolsMenu.addItem(withTitle: "Accelerate Large Downloads",
                           action: #selector(toggleChunkedDownloads(_:)),
                           keyEquivalent: "")
+        let activityParent = toolsMenu.addItem(withTitle: "Tab Activity", action: nil, keyEquivalent: "")
+        activityMenu.delegate = self
+        toolsMenu.setSubmenu(activityMenu, for: activityParent)
+        let watchesParent = toolsMenu.addItem(withTitle: "Watches", action: nil, keyEquivalent: "")
+        watchesMenu.delegate = self
+        toolsMenu.setSubmenu(watchesMenu, for: watchesParent)
         toolsMenu.addItem(.separator())
         let passwordsParent = toolsMenu.addItem(withTitle: "Passwords", action: nil, keyEquivalent: "")
         passwordsMenu.delegate = self
@@ -1131,6 +1422,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
             return true
         case #selector(toggleChunkedDownloads(_:)):
             menuItem.state = ChunkedDownload.isEnabled ? .on : .off
+            return true
+        case #selector(togglePreconnect(_:)):
+            menuItem.state = WaypointPreconnect.isEnabled ? .on : .off
             return true
         case #selector(setScanPolicy(_:)):
             let policies: [Int: ScanPolicy] = [0: .off, 1: .riskyOrLarge, 2: .everything]
