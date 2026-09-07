@@ -1027,7 +1027,7 @@ extension BrowserWindowController: NSMenuItemValidation {
             return inspector != nil
         case #selector(viewPageSource(_:)):
             return webView.url != nil && !NewTabPage.isInternalURL(webView.url)
-        case #selector(watchSelectedValue(_:)):
+        case #selector(watchSelectedValue(_:)), #selector(compareSelectedValue(_:)):
             // Never in incognito: a watch is a URL written to disk and reloaded for days.
             return !isPrivate && webView.url != nil && !NewTabPage.isInternalURL(webView.url)
         case #selector(toggleBookmark(_:)):
@@ -1454,14 +1454,15 @@ extension BrowserWindowController {
         webView.callAsyncJavaScript("return document.documentElement.outerHTML;",
                                     in: nil, in: .defaultClient) { [weak self] result in
             guard let self, case .success(let raw) = result, let html = raw as? String else { return }
-            self.openSourceTab().showSource(html, of: url)
+            self.openBlankTab().showSource(html, of: url)
         }
     }
 
-    /// `openInNewTab(nil)` cannot be used here: it starts the new tab page loading, and
-    /// the source that follows loses the race against it — the tab ends up showing the
-    /// start page. This opens the same tab without giving it anything to load first.
-    private func openSourceTab() -> BrowserWindowController {
+    /// `openInNewTab(nil)` cannot be used for a tab whose content Rocket supplies
+    /// itself: it starts the new tab page loading, and what follows loses the race
+    /// against it — the tab ends up showing the start page. This opens the same tab
+    /// without giving it anything to load first.
+    func openBlankTab() -> BrowserWindowController {
         let configuration = webView.configuration.copy() as! WKWebViewConfiguration
         let controller = BrowserWindowController(configuration: configuration,
                                                  incognitoSession: incognitoSession)
@@ -1502,19 +1503,35 @@ extension BrowserWindowController {
     /// later checks read the element — so the confirmation shows what Rocket will
     /// actually be reading, not what the mouse dragged over.
     @objc func watchSelectedValue(_ sender: Any?) {
+        captureSelectedValue { url, title, selector, value, window in
+            self.confirmWatch(url: url, title: title, selector: selector, value: value, in: window)
+        }
+    }
+
+    /// Same capture, same refusal, one extra question: which comparison this value
+    /// joins. Everything after that is the watch machinery — a comparison is a name
+    /// shared by several watches, not a second kind of thing.
+    @objc func compareSelectedValue(_ sender: Any?) {
+        captureSelectedValue { url, title, selector, value, window in
+            self.confirmComparison(url: url, title: title, selector: selector, value: value, in: window)
+        }
+    }
+
+    private func captureSelectedValue(
+        _ body: @escaping (_ url: URL, _ title: String, _ selector: String,
+                           _ value: String, _ window: NSWindow) -> Void) {
         guard let window, !isPrivate, let url = webView.url, !NewTabPage.isInternalURL(url) else { return }
         webView.callAsyncJavaScript(PageWatchChecker.captureScript,
                                     in: nil, in: .defaultClient) { [weak self] result in
             guard let self else { return }
-            guard case .success(let raw) = result, let body = raw as? [String: Any],
-                  body["ok"] as? Bool == true,
-                  let selector = body["selector"] as? String, !selector.isEmpty,
-                  let value = body["value"] as? String, !value.isEmpty else {
+            guard case .success(let raw) = result, let captured = raw as? [String: Any],
+                  captured["ok"] as? Bool == true,
+                  let selector = captured["selector"] as? String, !selector.isEmpty,
+                  let value = captured["value"] as? String, !value.isEmpty else {
                 self.presentWatchRefusal(in: window)
                 return
             }
-            self.confirmWatch(url: url, title: (body["title"] as? String) ?? "",
-                              selector: selector, value: value, in: window)
+            body(url, (captured["title"] as? String) ?? "", selector, value, window)
         }
     }
 
@@ -1547,6 +1564,61 @@ extension BrowserWindowController {
                 // Stamped as just-checked: the value on screen *is* this check.
                 checkedAt: Date()))
         }
+    }
+
+    private func confirmComparison(url: URL, title: String, selector: String,
+                                   value: String, in window: NSWindow) {
+        let existing = Comparison.names(in: PageWatchStore.shared.watches)
+        let alert = NSAlert()
+        alert.messageText = "Add to a comparison"
+        alert.informativeText = """
+        Rocket will keep rechecking this on \(url.host ?? url.absoluteString) and line it \
+        up against everything else in the same comparison, cheapest first:
+
+        \(value.prefix(140))
+        """
+        alert.addButton(withTitle: "Add")
+        alert.addButton(withTitle: "Cancel")
+
+        // Editable: an existing comparison is picked from the list, a new one is typed.
+        let name = NSComboBox(frame: NSRect(x: 0, y: 0, width: 260, height: 25))
+        name.addItems(withObjectValues: existing)
+        name.completes = true
+        name.stringValue = existing.first ?? "Prices"
+        let interval = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 260, height: 25))
+        interval.addItems(withTitles: PageWatch.intervals.map(\.title))
+        interval.selectItem(at: 1)
+        let fields = NSStackView(views: [label("Comparison"), name, label("Check"), interval])
+        fields.orientation = .vertical
+        fields.alignment = .leading
+        fields.spacing = 4
+        fields.frame = NSRect(x: 0, y: 0, width: 260, height: 108)
+        alert.accessoryView = fields
+        alert.window.initialFirstResponder = name
+
+        alert.beginSheetModal(for: window) { response in
+            guard response == .alertFirstButtonReturn else { return }
+            let comparison = name.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !comparison.isEmpty else { return }
+            let pageTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+            PageWatchStore.shared.add(PageWatch(
+                url: url.absoluteString,
+                host: url.host ?? "",
+                title: pageTitle.isEmpty ? (url.host ?? url.absoluteString) : pageTitle,
+                selector: selector,
+                value: value,
+                interval: PageWatch.intervals[interval.indexOfSelectedItem].seconds,
+                checkedAt: Date(),
+                comparison: comparison))
+            AppDelegate.shared.openComparisonPage(nil)
+        }
+    }
+
+    private func label(_ text: String) -> NSTextField {
+        let field = NSTextField(labelWithString: text)
+        field.font = .systemFont(ofSize: 11)
+        field.textColor = .secondaryLabelColor
+        return field
     }
 
     private func presentWatchRefusal(in window: NSWindow) {
@@ -1583,6 +1655,19 @@ final class NewTabPageBridge: NSObject, WKScriptMessageHandler {
         case "excludeSuggestion":
             guard let host = body["host"] as? String, !host.isEmpty else { return }
             controller?.confirmExcludeSuggestion(host: host)
+
+        // The two comparison-page controls. Both are ignored unless the page asking is
+        // the comparison page itself: any site can post to this handler, and neither of
+        // these should be reachable from one.
+        case "checkComparisons":
+            guard Comparison.isComparisonURL(sender.url) else { return }
+            PageWatchChecker.shared.check(ids: PageWatchStore.shared.watches
+                .filter { $0.comparison != nil }.map(\.id))
+
+        case "removeComparisonItem":
+            guard Comparison.isComparisonURL(sender.url),
+                  let id = (body["id"] as? String).flatMap(UUID.init(uuidString:)) else { return }
+            PageWatchStore.shared.remove(id: id)
 
         case "retrain":
             SuggestionEngine.shared.retrain { _ in

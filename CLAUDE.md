@@ -183,6 +183,33 @@ rest of the run. `watchNotificationPopover(for:)` takes the watches it renders i
 reading the store, which is what lets a harness build and open it with no browser window
 and no watches.json anywhere near it.
 
+**A comparison is a name shared by several watches, not a second kind of thing.**
+`Comparison` groups `PageWatch`es by an optional `comparison` name and orders them
+cheapest first with `WatchValue.number`, which already knows that "$1,299.00" and
+"€1.299,00" are the same money. Everything else — the selector capture, the off-screen
+recheck, the change detection, the storage — is the watch machinery unchanged, which is
+why adding this needed one optional field: the synthesized decoder reads a missing key
+as nil, so every watch written before comparisons existed migrates as an ungrouped one.
+Values that do not parse as numbers are sorted behind the ones that do rather than
+dropped, so a comparison whose site redesigned itself looks wrong instead of looking
+empty. The one piece of news a lone watch cannot carry is the cheapest changing hands,
+so `PageWatchChecker` reads the group's leader either side of an update and posts
+`.comparisonLeaderChanged` when it differs — the watch that moved is deliberately not
+the test, because a price *rising* hands the lead to a rival that never changed.
+
+The comparison page is a rendering of the store, never a second copy of it:
+`Comparison.open` regenerates `compare.html` and loads it, and every
+`.watchesDidChange` rewrites whichever tab is showing it, which is what puts a removed
+row or a fresh price on screen with nobody reloading anything. It is opened through
+`openBlankTab` (renamed from `openSourceTab`) rather than `openInNewTab(nil)` for the
+reason that function documents — a tab whose content Rocket supplies itself must not
+race the start page. Its two controls ride the existing `rocket` message handler, and
+both refuse to act unless `message.webView.url` is the comparison page: any site can
+post to that handler. `page(for:)` is pure and takes the groups it renders, so the whole
+layout is testable with no store and no browser; it escapes attribute values with its
+own helper because `htmlEscaped` leaves quotes alone, and a page title is written by the
+site.
+
 **Browser-install promos are matched by shape, not by selector.** `PromoBlocker` strips "install Chrome" cards from Google's services. Google rotates those class names and ids constantly, so it instead looks for a card-sized block (≤400 characters, climbing at most 8 ancestors) that either links to a Chrome install URL or carries a high-precision pitch phrase *and* owns a button. The ancestor cap is the guard that keeps it from eating an article that merely discusses Chrome, and it no-ops entirely on Google's real Chrome download pages. Its `MutationObserver` sweeps on a `setTimeout`, not `requestAnimationFrame` — rAF is suspended for non-rendering views, so promos in background tabs survived.
 
 **Passwords are enclave-gated; the index deliberately is not.** `PasswordStore` keeps two encryption tiers in `passwords.vault`. Secrets (passwords, notes, OTP seeds) sit under a vault key K that only opens through a Secure Enclave key created with `.userPresence` — every use needs Touch ID or the macOS password, enforced by the enclave itself rather than by app code. The site/username index sits under a second key Ki that a *silent* enclave key opens with no prompt. That asymmetry is the whole design: it is what lets the dropdown and the manager list accounts before you authenticate, the way Chrome and Safari do. The index is still unreadable off this Mac, and local malware learning site+username pairs was accepted because `history.json` already exposes every site in plain text. K is additionally wrapped under a PBKDF2-stretched recovery key (shown once at setup), which is the only way into the vault on another Mac; `needsRestore` is set when the *silent* wrap fails to open, because that is the one check that needs no prompt. `mutate`/`withSecrets` are the only path to K. `markUsed` touches the index only and must stay prompt-free.
@@ -247,4 +274,4 @@ Field rectangles arrive as CSS pixels plus the top-level viewport width, and the
   the process either. `interactionState` does round-trip a tab perfectly (restoring it
   sets the URL and begins loading synchronously, back/forward list intact) — it just buys
   nothing here. Use Tab Activity to see what a tab actually costs before optimising it.
-- All user data lives in `~/Library/Application Support/Rocket/` (`bookmarks.json`, `history.json`, `session.json`, `suggestions.json`, `passwords.vault`, `newtab.html`, `wallpaper-*`). The vault is written atomically at mode 0600. Wallpaper files get a timestamped name on every change for cache busting.
+- All user data lives in `~/Library/Application Support/Rocket/` (`bookmarks.json`, `history.json`, `session.json`, `suggestions.json`, `passwords.vault`, `watches.json`, `newtab.html`, `compare.html`, `wallpaper-*`). The vault is written atomically at mode 0600. Wallpaper files get a timestamped name on every change for cache busting.

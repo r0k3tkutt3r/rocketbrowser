@@ -21,6 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     private let passwordsMenu = NSMenu(title: "Passwords")
     private let activityMenu = NSMenu(title: "Tab Activity")
     private let watchesMenu = NSMenu(title: "Watches")
+    private let compareMenu = NSMenu(title: "Compare")
     /// The launch notification for changed watches, held while it is on screen.
     private var watchPopover: NSPopover?
     /// Recently closed tabs, newest last — the ⇧⌘T stack.
@@ -94,9 +95,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
             PageWatchChecker.shared.checkDue()
         }
-        NotificationCenter.default.addObserver(forName: .watchesDidChange, object: nil, queue: .main) { _ in
+        NotificationCenter.default.addObserver(forName: .watchesDidChange, object: nil,
+                                               queue: .main) { [weak self] _ in
             let unread = PageWatchStore.shared.unreadCount
             NSApp.dockTile.badgeLabel = unread > 0 ? "\(unread)" : nil
+            self?.reloadComparisonPages()
+        }
+        NotificationCenter.default.addObserver(forName: .comparisonLeaderChanged, object: nil,
+                                               queue: .main) { [weak self] notification in
+            self?.announceLeaderChange(notification)
         }
         let unread = PageWatchStore.shared.unreadCount
         NSApp.dockTile.badgeLabel = unread > 0 ? "\(unread)" : nil
@@ -682,7 +689,118 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
             rebuildActivityMenu()
         } else if menu === watchesMenu {
             rebuildWatchesMenu()
+        } else if menu === compareMenu {
+            rebuildCompareMenu()
         }
+    }
+
+    /// One row per comparison, cheapest value alongside. The page is where a comparison
+    /// is actually read; this menu is how you get to it and how you add to it.
+    private func rebuildCompareMenu() {
+        compareMenu.removeAllItems()
+        let add = compareMenu.addItem(withTitle: "Add This Value…",
+                                      action: #selector(BrowserWindowController.compareSelectedValue(_:)),
+                                      keyEquivalent: "")
+        add.toolTip = "Select a price on the page first."
+        compareMenu.addItem(withTitle: "Open Comparison Page",
+                            action: #selector(openComparisonPage(_:)), keyEquivalent: "").target = self
+
+        let groups = Comparison.groups(in: PageWatchStore.shared.watches)
+        guard !groups.isEmpty else { return }
+        compareMenu.addItem(.separator())
+        for group in groups {
+            let summary = group.lowest.map { "  —  cheapest \($0.value.prefix(24))" } ?? ""
+            let parent = compareMenu.addItem(withTitle: "\(group.name.prefix(32))\(summary)",
+                                             action: #selector(openComparisonPage(_:)), keyEquivalent: "")
+            parent.target = self
+
+            let submenu = NSMenu(title: group.name)
+            for item in group.items {
+                let title = "\(item.value.prefix(24))  —  \(item.host.prefix(32))"
+                let row = submenu.addItem(withTitle: title, action: #selector(openWatch(_:)), keyEquivalent: "")
+                row.representedObject = item.id
+                row.target = self
+                row.state = group.lowest?.id == item.id ? .on : .off
+            }
+            submenu.addItem(.separator())
+            for (title, action) in [("Check Now", #selector(checkComparison(_:))),
+                                    ("Delete Comparison", #selector(deleteComparison(_:)))] {
+                let item = submenu.addItem(withTitle: title, action: action, keyEquivalent: "")
+                item.representedObject = group.name
+                item.target = self
+            }
+            compareMenu.setSubmenu(submenu, for: parent)
+        }
+    }
+
+    /// Opens the comparison page in a tab — reusing the one already showing it rather
+    /// than stacking up copies of a page that renders the same store every time.
+    @objc func openComparisonPage(_ sender: Any?) {
+        if let existing = controllers.first(where: { Comparison.isComparisonURL($0.webView.url) }) {
+            Comparison.open(in: existing.webView)
+            existing.window?.makeKeyAndOrderFront(nil)
+            return
+        }
+        guard let front = frontNormalBrowserController else {
+            // Not `openNewWindow(url: nil)`: that starts the start page loading, which
+            // the page below would then have to race. Same reason as `openBlankTab`.
+            let controller = BrowserWindowController(configuration: BrowserWindowController.makeConfiguration())
+            register(controller)
+            controller.showWindow(nil)
+            Comparison.open(in: controller.webView)
+            return
+        }
+        Comparison.open(in: front.openBlankTab().webView)
+    }
+
+    @objc func checkComparison(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String,
+              let group = Comparison.group(named: name, in: PageWatchStore.shared.watches) else { return }
+        PageWatchChecker.shared.check(ids: group.items.map(\.id))
+    }
+
+    @objc func deleteComparison(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String,
+              let group = Comparison.group(named: name, in: PageWatchStore.shared.watches) else { return }
+        for item in group.items { PageWatchStore.shared.remove(id: item.id) }
+    }
+
+    /// The comparison page is a rendering of the store, so every store change rewrites
+    /// whichever tab is showing it. That is also what puts a removed row or a fresh
+    /// price on screen without anyone reloading anything.
+    private func reloadComparisonPages() {
+        for controller in controllers where Comparison.isComparisonURL(controller.webView.url) {
+            Comparison.open(in: controller.webView)
+        }
+    }
+
+    /// Someone went below someone else while Rocket was running. The Dock badge already
+    /// carries "something changed"; this says which way, in the window in front of you.
+    private func announceLeaderChange(_ notification: Notification) {
+        guard let name = notification.userInfo?["comparison"] as? String,
+              let id = notification.userInfo?["watch"] as? UUID,
+              let leader = PageWatchStore.shared.watch(id: id),
+              let anchor = frontNormalBrowserController?.window?.contentView else { return }
+        let row = NSButton(title: "", target: self, action: #selector(openComparisonFromNotification(_:)))
+        row.isBordered = false
+        row.alignment = .left
+        row.attributedTitle = NSAttributedString(
+            string: "▼ \(leader.value.prefix(24))  —  \(leader.title.prefix(36))",
+            attributes: [.foregroundColor: NSColor.linkColor, .font: NSFont.systemFont(ofSize: 12)])
+        let hint = NSTextField(labelWithString: "Open \(name)")
+        hint.font = .systemFont(ofSize: 11)
+        hint.textColor = .secondaryLabelColor
+
+        let popover = self.popover(heading: "New lowest price in \(name)", rows: [row, hint])
+        popover.show(relativeTo: NSRect(x: anchor.bounds.maxX - 80, y: anchor.bounds.maxY - 1,
+                                        width: 32, height: 1),
+                     of: anchor, preferredEdge: .maxY)
+        watchPopover = popover
+    }
+
+    @objc private func openComparisonFromNotification(_ sender: NSButton) {
+        watchPopover?.performClose(nil)
+        openComparisonPage(nil)
     }
 
     /// Every watched value, changed ones first. Opening this menu is what counts as
@@ -780,10 +898,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     /// the value used to be under each. Separate from the launch check above so it can be
     /// built and inspected without an app around it.
     func watchNotificationPopover(for changed: [PageWatch]) -> NSPopover {
-        let heading = NSTextField(labelWithString: changed.count == 1
-            ? "A watched value changed" : "\(changed.count) watched values changed")
-        heading.font = .systemFont(ofSize: 13, weight: .semibold)
-        var rows: [NSView] = [heading]
+        var rows: [NSView] = []
         for watch in changed.prefix(5) {
             let arrow = watch.previousValue.flatMap {
                 WatchValue.marker(for: WatchValue.compare(old: $0, new: watch.value))
@@ -805,7 +920,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
             }
         }
 
-        let stack = NSStackView(views: rows)
+        return popover(heading: changed.count == 1
+            ? "A watched value changed" : "\(changed.count) watched values changed", rows: rows)
+    }
+
+    /// The shell every one of these notifications shares: a bold heading, a column of
+    /// rows, and a transient popover sized to fit them.
+    private func popover(heading: String, rows: [NSView]) -> NSPopover {
+        let title = NSTextField(labelWithString: heading)
+        title.font = .systemFont(ofSize: 13, weight: .semibold)
+
+        let stack = NSStackView(views: [title] + rows)
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 6
@@ -1312,6 +1437,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         let watchesParent = toolsMenu.addItem(withTitle: "Watches", action: nil, keyEquivalent: "")
         watchesMenu.delegate = self
         toolsMenu.setSubmenu(watchesMenu, for: watchesParent)
+        let compareParent = toolsMenu.addItem(withTitle: "Compare", action: nil, keyEquivalent: "")
+        compareMenu.delegate = self
+        toolsMenu.setSubmenu(compareMenu, for: compareParent)
         toolsMenu.addItem(.separator())
         let passwordsParent = toolsMenu.addItem(withTitle: "Passwords", action: nil, keyEquivalent: "")
         passwordsMenu.delegate = self

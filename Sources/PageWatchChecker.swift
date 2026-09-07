@@ -130,6 +130,10 @@ final class PageWatchChecker: NSObject, WKNavigationDelegate {
 
     private func record(watch: PageWatch, value: String?) {
         let store = PageWatchStore.shared
+        // "Cheapest" is only news against whatever was cheapest a moment ago, so it has
+        // to be read before the update as well as after it.
+        let leaderBefore = watch.comparison
+            .flatMap { Comparison.group(named: $0, in: store.watches)?.lowest?.id }
         guard let value else {
             store.update(id: watch.id) { current in
                 current.checkedAt = Date()
@@ -153,6 +157,16 @@ final class PageWatchChecker: NSObject, WKNavigationDelegate {
         // failing when it does not have one, which is a poor trade for a badge. The
         // badge itself is set from the store's notification, in AppDelegate.
         NSApp.requestUserAttention(.informationalRequest)
+
+        // Someone went below someone else. The watch that moved is not necessarily the
+        // new leader — a price rising can hand the lead to a rival that never changed —
+        // so this compares the leader, not the watch.
+        if let name = watch.comparison,
+           let leader = Comparison.group(named: name, in: store.watches)?.lowest,
+           leader.id != leaderBefore {
+            NotificationCenter.default.post(name: .comparisonLeaderChanged, object: nil,
+                                            userInfo: ["comparison": name, "watch": leader.id])
+        }
     }
 
     // MARK: - Page scripts

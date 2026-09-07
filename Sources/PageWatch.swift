@@ -23,11 +23,15 @@ struct PageWatch: Codable, Equatable {
     var missingSince: Date?
     /// Changed since the user last opened the list.
     var unread: Bool
+    /// The comparison this value belongs to, if any — nothing but a shared name. Being
+    /// optional is what migrates every watch written before comparisons existed: the
+    /// synthesized decoder reads a missing key as nil.
+    var comparison: String?
 
     init(id: UUID = UUID(), url: String, host: String, title: String, selector: String,
          value: String, previousValue: String? = nil, interval: TimeInterval,
          checkedAt: Date? = nil, changedAt: Date? = nil, missingSince: Date? = nil,
-         unread: Bool = false) {
+         unread: Bool = false, comparison: String? = nil) {
         self.id = id
         self.url = url
         self.host = host
@@ -40,6 +44,7 @@ struct PageWatch: Codable, Equatable {
         self.changedAt = changedAt
         self.missingSince = missingSince
         self.unread = unread
+        self.comparison = comparison
     }
 
     /// How often a watch may be rechecked. Nothing shorter than an hour: these are
