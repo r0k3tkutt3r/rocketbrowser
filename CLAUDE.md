@@ -222,6 +222,35 @@ Every enclave call and PBKDF2 derivation runs on `PasswordStore.queue`, never on
 
 Field rectangles arrive as CSS pixels plus the top-level viewport width, and the native side derives the scale from `webView.bounds.width / viewportWidth` rather than assuming 1.0 — the same trick `ImageTextScanner` uses, and what makes the panel land correctly under ⌘+/⌘− zoom. `screenRect` refuses to trust a measurement it cannot sanity-check (zero-size rect, an unlaid-out web view, a scale outside 0.2–5, or a result on no screen at all) and falls back to the toolbar key button, because a number taken on faith puts the panel in a corner of the display. `PasswordDropdown.frame(width:height:below:within:)` then clamps: below the field normally, flipped above it when the field sits low, never past an edge, and pinned inside as a last resort. It is pure so the placement rules are testable without a screen — the panel appearing cut off at the top-left corner was a real bug.
 
+**AI agents drive Rocket over MCP, and Rocket is the server.** `AgentServer` listens on
+`127.0.0.1:9317` (`AgentPort` overrides) and answers `POST /mcp` with plain JSON-RPC —
+`initialize`, `tools/list`, `tools/call`, `ping`; notifications get 202. No second
+binary, no shim: Tools ▸ AI Agent Access copies the one-line `claude mcp add` command or
+the Codex `config.toml` block, token included. It serves the initialize-handshake
+generation of the protocol on purpose: the 2026-07-28 revision is stateless
+(`server/discover`), and every client that speaks it probes, gets method-not-found here
+and falls back to `initialize`, which is the documented path. The endpoint is a door into
+logged-in sessions, so `AgentServer.rejection(for:token:)` is the part that matters:
+`Host` must be loopback (DNS rebinding arrives with its own host name), any request with
+`Origin` or `Sec-Fetch-Site` is refused (a page's `fetch` always sends one, an agent's
+client never does), `Content-Type` must be `application/json` (a page cannot send that
+cross-origin without a preflight nobody answers), and a bearer token generated once into
+`UserDefaults` keeps other macOS accounts on the same Mac out — loopback is shared
+between users, which is the gap Chrome's remote debugging has. `AgentAccess` reads
+`?? false`, the same exception as `RestoreSession` and for the same reason. Incognito
+tabs are filtered in `AppDelegate`'s `AgentContext`, not in the tools, so no tool can
+reach one by accident. The tool table is `AgentTools.all`: `snapshot` numbers the visible
+interactive elements and keeps them on `window.__rocketRefs` in the isolated
+`RocketAgent` content world — that world's globals persist for the document, so
+`click`/`type` find the same nodes, and its pristine prototypes are what make the
+`HTMLInputElement.prototype.value` setter trustworthy, the same trick autofill uses —
+while `read` and `evaluate` run in `.page` so the model sees the page's real globals. A
+tool's own failure travels in-band as `isError`, so the model reads it and tries
+something else; only protocol trouble is a JSON-RPC error. `open`/`navigate`/`click`/
+`type` wait for the load they trigger so an agent never has to poll. Clicks are
+synthetic (`el.click()`, `isTrusted` false); a site that ignores those needs a native
+event at the element's rect, which is the documented upgrade.
+
 **Popup contract.** In `createWebViewWith`, the new `WKWebView` MUST be built with the exact configuration WebKit passes in — never a copy. Everywhere else (⌘T, ⌘-click), new tabs copy the current web view's configuration so private tabs stay private.
 
 ## Gotchas
@@ -252,7 +281,7 @@ Field rectangles arrive as CSS pixels plus the top-level viewport width, and the
 - `NewTabPage.isNewTabURL` distinguishes the internal start page (a `file://` URL) from real pages — it gates history recording, bookmarking, and the URL field showing empty. Check it when adding anything that reacts to the current URL.
 - History recording is skipped for incognito windows, non-http(s) schemes, and the navigation right after an error page (`suppressHistoryOnce`).
 - Settings are plain `UserDefaults` keys read with `object(forKey:) as? Bool ?? true` so the default is "on": `ShowBookmarksBar`, `BlockAds`, `HideCookieBanners`, `FingerprintProtection`, `SuggestionsEnabled`, `SearchSuggestions`, plus `VTScanPolicy`, `VTUploadUnknownFiles`, `VTKeyFilePath`, plus `SuggestionsExcludedHosts`, `SuggestionsLastTrained`, `Homepage`.
-- `RestoreSession` is the one deliberate exception to that convention: it reads `?? false`. Restoring tabs changes what launching the app does, which is something to opt into rather than discover. Not a typo — don't "fix" it.
+- `RestoreSession` and `AgentAccess` are the two deliberate exceptions to that convention: they read `?? false`. Restoring tabs changes what launching the app does, and agent access changes who can act in the browser — both are things to opt into rather than discover. Not typos — don't "fix" them. `AgentPort` and `AgentToken` ride alongside.
 - History recording is gated on `SuggestionEngine.shared.isEnabled` (see the `didFinish` guard). Turning off new-tab suggestions therefore stops history collection entirely, which would leave the ⌘Y window mysteriously empty — so its empty state says so and names the setting. Removing that gate would silently start logging for someone who opted out; treat it as a deliberate product decision, not cleanup.
 - `DateFormatter.calendar` does not carry the calendar's time zone — the formatter keeps its own and falls back to the system's. That agrees by luck when both are `.current` and diverges the moment a caller passes another calendar, which is exactly what the tests do. `HistoryGrouping.makeFormatter` sets both; do the same anywhere else a calendar is threaded through.
 - The data-protection keychain and `SecKeyCreateRandomKey` with `kSecAttrTokenIDSecureEnclave` both return `-34018` ("missing entitlement") under ad-hoc signing, and adding `keychain-access-groups` or `application-identifier` to an ad-hoc signature gets the binary SIGKILLed by AMFI at launch. CryptoKit's `SecureEnclave.P256` is the one enclave API that needs no entitlement, which is why `SecureEnclaveProvider` uses it and stores the opaque key blob inside `passwords.vault` rather than in the keychain. All of this was measured on this machine; don't "fix" it back to the keychain.

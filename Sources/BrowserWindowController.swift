@@ -1,6 +1,8 @@
 import Cocoa
 import WebKit
 
+private var nextAgentTabID = 0
+
 /// One browser tab. Tabs are native macOS window tabs (Safari-style): each tab is a
 /// window managed by one of these controllers, grouped by tabbingIdentifier.
 final class BrowserWindowController: NSWindowController {
@@ -10,6 +12,12 @@ final class BrowserWindowController: NSWindowController {
     /// shared by every tab spawned from the same incognito window.
     let incognitoSession: IncognitoSession?
     var isPrivate: Bool { incognitoSession != nil }
+    /// Stable handle an AI agent uses to name this tab over the MCP server
+    /// (`AgentServer`). Monotonic so a closed tab's number is never reused.
+    let agentTabID: Int = {
+        nextAgentTabID += 1
+        return nextAgentTabID
+    }()
 
     private let urlField = URLField()
     private let progressBar = ProgressBar(frame: .zero)

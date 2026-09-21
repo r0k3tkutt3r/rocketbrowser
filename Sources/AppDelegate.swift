@@ -77,6 +77,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         SuggestionEngine.shared.retrainIfDue { [weak self] trained in
             if trained { self?.reloadNewTabPages() }
         }
+
+        // MCP for AI agents. Incognito is filtered right here so no tool can see it.
+        AgentServer.shared.context = AgentContext(
+            tabs: { [weak self] in self?.controllers.filter { !$0.isPrivate } ?? [] },
+            front: { [weak self] in self?.frontNormalBrowserController },
+            open: { [weak self] url in
+                guard let self else { fatalError("app delegate gone") }
+                if let front = self.frontNormalBrowserController { return front.openInNewTab(url) }
+                return self.openNewWindow(url: url)
+            })
+        if AgentServer.isEnabled { AgentServer.shared.start() }
+
         // A few syscalls per tab. It has to run whether or not anyone is looking,
         // because a CPU rate is a difference between two samples.
         let sampler = Timer.scheduledTimer(withTimeInterval: TabActivity.sampleInterval,
@@ -284,6 +296,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
 
     @objc func toggleSessionRestore(_ sender: Any?) {
         SessionStore.restoresOnLaunch.toggle()
+    }
+
+    // MARK: - AI agents
+
+    @objc func toggleAgentAccess(_ sender: Any?) {
+        AgentServer.isEnabled.toggle()
+        if AgentServer.isEnabled { AgentServer.shared.start() } else { AgentServer.shared.stop() }
+    }
+
+    @objc func copyClaudeCodeSetup(_ sender: Any?) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(AgentServer.claudeCodeSetupCommand, forType: .string)
+    }
+
+    @objc func copyCodexSetup(_ sender: Any?) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(AgentServer.codexSetupSnippet, forType: .string)
     }
 
     // MARK: - Passwords
@@ -1419,6 +1448,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         toolsMenu.addItem(withTitle: "Restore Tabs on Launch",
                           action: #selector(toggleSessionRestore(_:)),
                           keyEquivalent: "")
+        let agentParent = toolsMenu.addItem(withTitle: "AI Agent Access", action: nil, keyEquivalent: "")
+        let agentMenu = NSMenu(title: "AI Agent Access")
+        agentMenu.addItem(withTitle: "Allow Agents to Control Rocket",
+                          action: #selector(toggleAgentAccess(_:)),
+                          keyEquivalent: "")
+        agentMenu.addItem(.separator())
+        agentMenu.addItem(withTitle: "Copy Claude Code Setup Command",
+                          action: #selector(copyClaudeCodeSetup(_:)),
+                          keyEquivalent: "")
+        agentMenu.addItem(withTitle: "Copy Codex Setup Snippet",
+                          action: #selector(copyCodexSetup(_:)),
+                          keyEquivalent: "")
+        toolsMenu.setSubmenu(agentMenu, for: agentParent)
         toolsMenu.addItem(.separator())
         let downloadsItem = toolsMenu.addItem(withTitle: "Show Downloads",
                                               action: #selector(showDownloadsWindow(_:)),
@@ -1541,6 +1583,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
             return true
         case #selector(toggleSessionRestore(_:)):
             menuItem.state = SessionStore.restoresOnLaunch ? .on : .off
+            return true
+        case #selector(toggleAgentAccess(_:)):
+            menuItem.state = AgentServer.isEnabled ? .on : .off
             return true
         case #selector(toggleSearchSuggestions(_:)):
             menuItem.state = AddressSuggestionProvider.remoteEnabled ? .on : .off
