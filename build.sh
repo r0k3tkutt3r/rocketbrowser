@@ -70,7 +70,15 @@ sign_bundle() {
         codesign --force --sign "$SIGN_ID" --options runtime --timestamp \
             --entitlements Entitlements.plist "$target"
     else
-        codesign --force --sign - --options runtime --entitlements Entitlements.plist "$target"
+        # An ad-hoc signature's designated requirement defaults to the binary's cdhash,
+        # which changes every build — so the keychain item holding the VirusTotal key
+        # saw each installed build as a stranger and asked for the login password on
+        # every launch. Naming the requirement explicitly makes the keychain identify
+        # Rocket by bundle id instead. The trade is that anything ad-hoc signed with
+        # this identifier could read that one item silently, which is no more than the
+        # plain-text key file already allows; the password vault never uses the keychain.
+        codesign --force --sign - --options runtime --entitlements Entitlements.plist \
+            --requirements '=designated => identifier "com.kushmodi.rocket"' "$target"
     fi
 }
 

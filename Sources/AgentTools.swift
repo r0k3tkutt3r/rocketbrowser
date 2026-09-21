@@ -78,7 +78,7 @@ private func withTab(_ args: [String: Any], _ context: AgentContext,
     } catch let error as AgentError {
         done(.failure(error))
     } catch {
-        done(.failure(AgentError(error.localizedDescription)))
+        done(.failure(AgentError(jsMessage(error))))
     }
 }
 
@@ -122,6 +122,12 @@ private func finishAction(_ controller: BrowserWindowController, urlBefore: URL?
     } else {
         respond()
     }
+}
+
+/// What a page script actually threw. WebKit's `localizedDescription` for a JS exception
+/// is always "A JavaScript exception occurred"; the message itself rides in userInfo.
+private func jsMessage(_ error: Error) -> String {
+    ((error as NSError).userInfo["WKJavaScriptExceptionMessage"] as? String) ?? error.localizedDescription
 }
 
 /// `evaluate`'s result value: JS `undefined`/`null` bridge to `NSNull`, an array or
@@ -224,7 +230,7 @@ enum AgentTools {
                         arguments: [:], in: nil, in: .page) { result in
                         switch result {
                         case .failure(let error):
-                            done(.failure(AgentError(error.localizedDescription)))
+                            done(.failure(AgentError(jsMessage(error))))
                         case .success(let value):
                             let text = (value as? String) ?? ""
                             let header = describe(controller) + "\n\n"
@@ -262,7 +268,7 @@ enum AgentTools {
                         snapshotScript, arguments: ["query": query], in: nil, in: agentWorld) { result in
                         switch result {
                         case .failure(let error):
-                            done(.failure(AgentError(error.localizedDescription)))
+                            done(.failure(AgentError(jsMessage(error))))
                         case .success(let value):
                             let text = (value as? String) ?? "(no interactive elements)"
                             done(.success([.text(describe(controller) + "\n" + text)]))
@@ -293,7 +299,7 @@ enum AgentTools {
                     controller.webView.callAsyncJavaScript(
                         clickScript, arguments: ["ref": ref], in: nil, in: agentWorld) { result in
                         if case .failure(let error) = result {
-                            done(.failure(AgentError(error.localizedDescription)))
+                            done(.failure(AgentError(jsMessage(error))))
                             return
                         }
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
@@ -337,7 +343,7 @@ enum AgentTools {
                         typeScript, arguments: ["ref": ref, "text": text, "submit": submit],
                         in: nil, in: agentWorld) { result in
                         if case .failure(let error) = result {
-                            done(.failure(AgentError(error.localizedDescription)))
+                            done(.failure(AgentError(jsMessage(error))))
                             return
                         }
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
@@ -372,7 +378,7 @@ enum AgentTools {
                     controller.webView.callAsyncJavaScript(js, arguments: [:], in: nil, in: .page) { result in
                         switch result {
                         case .failure(let error):
-                            done(.failure(AgentError(error.localizedDescription)))
+                            done(.failure(AgentError(jsMessage(error))))
                         case .success(let value):
                             done(.success([.text(describeJSValue(value))]))
                         }
@@ -481,7 +487,9 @@ enum AgentTools {
             const collapse = (s) => (s || '').replace(/\s+/g, ' ').trim();
             let label = collapse(el.getAttribute('aria-label'));
             if (!label && el.labels && el.labels[0]) { label = collapse(el.labels[0].textContent); }
-            if (!label) { label = collapse(el.textContent); }
+            // A select's textContent is every option run together; its options are
+            // listed separately below.
+            if (!label && el.tagName !== 'SELECT') { label = collapse(el.textContent); }
             if (!label) { label = collapse(el.getAttribute('placeholder')); }
             if (!label) { label = collapse(el.getAttribute('title')); }
             if (!label) {
@@ -506,7 +514,12 @@ enum AgentTools {
                 line += ' href=' + el.href.slice(0, 120);
             }
             const isPassword = el.tagName === 'INPUT' && (el.getAttribute('type') || '').toLowerCase() === 'password';
-            const value = (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') ? el.value : '';
+            let value = (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') ? el.value : '';
+            if (el.tagName === 'SELECT') {
+                const options = Array.from(el.options).map((o) => o.textContent.trim());
+                value = el.selectedIndex >= 0 ? options[el.selectedIndex] : '';
+                line += ' options=[' + options.slice(0, 12).join(' | ').slice(0, 160) + (options.length > 12 ? ' | …' : '') + ']';
+            }
             if (!isPassword && value) {
                 line += ' value="' + String(value).slice(0, 80) + '"';
             } else {

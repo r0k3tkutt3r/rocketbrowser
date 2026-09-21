@@ -1420,6 +1420,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
             withTitle: "Reload Ignoring Cache",
             action: #selector(BrowserWindowController.reloadIgnoringCache(_:)), keyEquivalent: "R")
         hardReload.keyEquivalentModifierMask = [.command, .shift]
+        developMenu.addItem(.separator())
+        let agentParent = developMenu.addItem(withTitle: "AI Agent Access", action: nil, keyEquivalent: "")
+        let agentMenu = NSMenu(title: "AI Agent Access")
+        agentMenu.addItem(withTitle: "Allow Agents to Control Rocket",
+                          action: #selector(toggleAgentAccess(_:)),
+                          keyEquivalent: "")
+        agentMenu.addItem(.separator())
+        agentMenu.addItem(withTitle: "Copy Claude Code Setup Command",
+                          action: #selector(copyClaudeCodeSetup(_:)),
+                          keyEquivalent: "")
+        agentMenu.addItem(withTitle: "Copy Codex Setup Snippet",
+                          action: #selector(copyCodexSetup(_:)),
+                          keyEquivalent: "")
+        developMenu.setSubmenu(agentMenu, for: agentParent)
 
         // Tools: everything that changes how Rocket behaves, as opposed to the View
         // menu's commands for the page currently on screen.
@@ -1448,19 +1462,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         toolsMenu.addItem(withTitle: "Restore Tabs on Launch",
                           action: #selector(toggleSessionRestore(_:)),
                           keyEquivalent: "")
-        let agentParent = toolsMenu.addItem(withTitle: "AI Agent Access", action: nil, keyEquivalent: "")
-        let agentMenu = NSMenu(title: "AI Agent Access")
-        agentMenu.addItem(withTitle: "Allow Agents to Control Rocket",
-                          action: #selector(toggleAgentAccess(_:)),
-                          keyEquivalent: "")
-        agentMenu.addItem(.separator())
-        agentMenu.addItem(withTitle: "Copy Claude Code Setup Command",
-                          action: #selector(copyClaudeCodeSetup(_:)),
-                          keyEquivalent: "")
-        agentMenu.addItem(withTitle: "Copy Codex Setup Snippet",
-                          action: #selector(copyCodexSetup(_:)),
-                          keyEquivalent: "")
-        toolsMenu.setSubmenu(agentMenu, for: agentParent)
         toolsMenu.addItem(.separator())
         let downloadsItem = toolsMenu.addItem(withTitle: "Show Downloads",
                                               action: #selector(showDownloadsWindow(_:)),
