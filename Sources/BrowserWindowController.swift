@@ -138,13 +138,27 @@ final class BrowserWindowController: NSWindowController {
         ContentBlocker.shared.apply(to: webView, isIncognito: isPrivate)
 
         let content = NSView()
+        // The web view is NOT pinned with constraints, on purpose. Element fullscreen
+        // (a video's ⛶ button) makes WebKit re-parent the web view into its own
+        // WebCoreFullScreenWindow, where it is sized by setFrame: alone. A view with
+        // translatesAutoresizingMaskIntoConstraints = false and no constraints has no
+        // size as far as Auto Layout is concerned, so the first layout pass in that
+        // window solved it to (0, 0, 0, 0) — measured: the pass runs from the
+        // makeKeyAndOrderFront: inside WebKit's own enter path. A fresh window has no
+        // layout engine yet, which is why the first fullscreen worked and only the
+        // second one showed a blank page (a real bug, reported as "the video goes
+        // black the second time"). So the constraints go on a plain host view and the
+        // web view autoresizes inside it, which is the shape WebKit expects to host.
+        let webViewHost = NSView()
+        webView.autoresizingMask = [.width, .height]
+        webViewHost.addSubview(webView)
         bookmarksBar.translatesAutoresizingMaskIntoConstraints = false
-        webView.translatesAutoresizingMaskIntoConstraints = false
+        webViewHost.translatesAutoresizingMaskIntoConstraints = false
         progressBar.translatesAutoresizingMaskIntoConstraints = false
         findBar.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(bookmarksBar)
         content.addSubview(findBar)
-        content.addSubview(webView)
+        content.addSubview(webViewHost)
         content.addSubview(progressBar)
         bookmarksBarHeight = bookmarksBar.heightAnchor.constraint(equalToConstant: 30)
         // Zero-height while hidden, matching how the bookmarks bar collapses.
@@ -158,16 +172,20 @@ final class BrowserWindowController: NSWindowController {
             findBar.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             findBar.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             findBarHeight,
-            webView.topAnchor.constraint(equalTo: findBar.bottomAnchor),
-            webView.bottomAnchor.constraint(equalTo: content.bottomAnchor),
-            webView.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            webView.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            progressBar.topAnchor.constraint(equalTo: webView.topAnchor),
+            webViewHost.topAnchor.constraint(equalTo: findBar.bottomAnchor),
+            webViewHost.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            webViewHost.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            webViewHost.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            progressBar.topAnchor.constraint(equalTo: webViewHost.topAnchor),
             progressBar.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             progressBar.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             progressBar.heightAnchor.constraint(equalToConstant: 3),
         ])
         window.contentView = content
+        // Give the host its first size now so the web view starts at full size instead
+        // of autoresizing up from zero.
+        content.layoutSubtreeIfNeeded()
+        webView.frame = webViewHost.bounds
 
         bookmarksBar.onOpen = { [weak self] bookmark, inNewTab in
             guard let self, let urlString = bookmark.url, let url = URL(string: urlString) else { return }
@@ -1159,18 +1177,48 @@ extension BrowserWindowController: WKNavigationDelegate {
     func webView(_ webView: WKWebView,
                  decidePolicyFor navigationResponse: WKNavigationResponse,
                  decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
-        decisionHandler(navigationResponse.canShowMIMEType ? .allow : .download)
+        // `Content-Disposition: attachment` is the server saying "save this", and it
+        // arrives on types WebKit can perfectly well display — Canva's PNG exports, a
+        // PDF, a CSV. Showing those inline is how a download turned into a page, or,
+        // in the hidden iframe sites use to trigger downloads, into nothing at all.
+        // The `download` attribute does not cover this: WebKit ignores it cross-origin,
+        // as the spec says, so the response header is the only signal left.
+        let disposition = (navigationResponse.response as? HTTPURLResponse)?
+            .value(forHTTPHeaderField: "Content-Disposition")?
+            .trimmingCharacters(in: .whitespaces).lowercased() ?? ""
+        let isAttachment = disposition.hasPrefix("attachment")
+        decisionHandler(navigationResponse.canShowMIMEType && !isAttachment ? .allow : .download)
+    }
+
+    /// WebKit's own right-click items — Download Image, Download Linked File, Download
+    /// Video — hand their WKDownload to the navigation delegate through this private
+    /// call and nothing else. Left unimplemented, the download has no delegate to name
+    /// a destination and WebKit cancels it without a word, which is what "Download
+    /// Image does nothing" was. Verified against this macOS's WebKit: the selector is
+    /// in the shared cache, and no public equivalent exists.
+    @objc(_webView:contextMenuDidCreateDownload:)
+    func webView(_ webView: WKWebView, contextMenuDidCreateDownload download: WKDownload) {
+        began(download, suggestedName: download.originalRequest?.url?.lastPathComponent ?? "Download")
     }
 
     func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
-        DownloadsManager.shared.begin(download,
-            suggestedName: navigationAction.request.url?.lastPathComponent ?? "Download")
-        showDownloadsPopoverIfHidden()
+        began(download, suggestedName: navigationAction.request.url?.lastPathComponent ?? "Download")
     }
 
     func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) {
-        DownloadsManager.shared.begin(download,
-            suggestedName: navigationResponse.response.suggestedFilename ?? "Download")
+        began(download, suggestedName: navigationResponse.response.suggestedFilename ?? "Download")
+    }
+
+    private func began(_ download: WKDownload, suggestedName: String) {
+        DownloadsManager.shared.begin(download, suggestedName: suggestedName)
+        // A tab opened only to carry a download (window.open / target=_blank to an
+        // attachment) has nothing to show once WebKit takes the response away from it.
+        // Safari closes that window; so does this. The download lives in
+        // DownloadsManager and outlives the tab, and the last window is never closed.
+        if webView.backForwardList.currentItem == nil, (window?.tabbedWindows?.count ?? 0) > 1 {
+            window?.close()
+            return
+        }
         showDownloadsPopoverIfHidden()
     }
 
