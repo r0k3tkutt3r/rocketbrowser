@@ -62,3 +62,73 @@ enum URLDisplay {
         return domain
     }
 }
+
+/// Turns address-bar input into a URL: direct URLs load as-is, bare hosts get https://,
+/// everything else becomes a search query — Google normally, Brave Search (which
+/// doesn't profile searches) in incognito windows.
+enum URLResolver {
+    static func resolve(_ input: String, privateSearch: Bool = false) -> URL? {
+        let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        if let url = subreddit(text) { return url }
+        if let url = googleShortcut(text) { return url }
+
+        if let url = URL(string: text), let scheme = url.scheme?.lowercased(),
+           ["http", "https", "file", "about"].contains(scheme) {
+            return url
+        }
+
+        let looksLikeHost = !text.contains(" ")
+            && (text.contains(".") || text.hasPrefix("localhost"))
+        if looksLikeHost {
+            let scheme = text.hasPrefix("localhost") || text.hasPrefix("127.0.0.1") ? "http" : "https"
+            if let url = URL(string: "\(scheme)://\(text)") { return url }
+        }
+
+        var components = URLComponents(string: privateSearch
+            ? "https://search.brave.com/search" : "https://www.google.com/search")!
+        components.queryItems = [URLQueryItem(name: "q", value: text)]
+        return components.url
+    }
+
+    /// "g/docs" opens docs.google.com. Unknown names fall through to a search.
+    static let googleServices: [String: String] = [
+        "docs": "docs", "drive": "drive", "slides": "slides", "sheets": "sheets",
+        "forms": "forms", "maps": "maps", "mail": "mail", "gmail": "mail",
+        "calendar": "calendar", "cal": "calendar", "meet": "meet", "photos": "photos",
+        "keep": "keep", "translate": "translate", "news": "news", "contacts": "contacts",
+        "gemini": "gemini", "chat": "chat", "sites": "sites", "scholar": "scholar",
+        "earth": "earth", "play": "play", "account": "myaccount", "analytics": "analytics",
+        "cloud": "console.cloud", "colab": "colab.research",
+    ]
+
+    static func googleShortcut(_ text: String) -> URL? {
+        guard text.lowercased().hasPrefix("g/") else { return nil }
+        let name = text.dropFirst(2).trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
+        guard let sub = googleServices[name] else { return nil }
+        return URL(string: "https://\(sub).google.com")
+    }
+
+    /// "r/claude" opens the subreddit; "r/claude best skills" searches inside it.
+    static func subreddit(_ text: String) -> URL? {
+        guard text.lowercased().hasPrefix("r/") else { return nil }
+        let rest = text.dropFirst(2)
+        let name = rest.prefix { !$0.isWhitespace }
+        guard !name.isEmpty,
+              name.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_") })
+        else { return nil }
+        let query = rest.dropFirst(name.count).trimmingCharacters(in: .whitespaces)
+        guard !query.isEmpty else { return URL(string: "https://www.reddit.com/r/\(name)") }
+        var components = URLComponents(string: "https://www.reddit.com/r/\(name)/search/")!
+        components.queryItems = [URLQueryItem(name: "q", value: query),
+                                 URLQueryItem(name: "restrict_sr", value: "1")]
+        return components.url
+    }
+}
+
+func htmlEscaped(_ string: String) -> String {
+    string
+        .replacingOccurrences(of: "&", with: "&amp;")
+        .replacingOccurrences(of: "<", with: "&lt;")
+        .replacingOccurrences(of: ">", with: "&gt;")
+}

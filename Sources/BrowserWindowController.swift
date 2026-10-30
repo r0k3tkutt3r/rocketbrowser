@@ -35,14 +35,17 @@ final class BrowserWindowController: NSWindowController {
     private var suppressHistoryOnce = false
 
     private let suggestionsDropdown = SuggestionsDropdown()
-    /// Completion request currently on the wire, and the newest query typed while it
-    /// was in flight. At most one request exists at a time; the newest text always wins.
-    private var inFlightSuggestionQuery: String?
-    private var pendingSuggestionQuery: String?
-    /// The last completions received, reused while a newer request is in flight so the
-    /// list keeps its shape instead of collapsing between keystrokes.
-    private var lastRemoteQuery: String?
-    private var lastRemoteItems: [String] = []
+    private lazy var completer = AddressCompleter(
+        privateSearch: isPrivate,
+        editingText: { [weak self] in
+            guard let self, let editor = self.urlField.currentEditor(),
+                  self.window?.firstResponder === editor else { return nil }
+            return editor.string
+        },
+        render: { [weak self] suggestions in
+            guard let self else { return }
+            self.suggestionsDropdown.show(suggestions, below: self.urlField)
+        })
     private var downloadsToolbarItem: NSToolbarItem?
     private weak var downloadsButton: NSButton?
     private let downloadsPopover = NSPopover()
@@ -486,77 +489,7 @@ final class BrowserWindowController: NSWindowController {
 
     private func refreshSuggestions() {
         // Read the field editor, not stringValue: it is the authority mid-edit.
-        let text = urlField.currentEditor()?.string ?? urlField.stringValue
-        guard !text.trimmingCharacters(in: .whitespaces).isEmpty else {
-            suggestionsDropdown.hide()
-            lastRemoteQuery = nil
-            lastRemoteItems = []
-            return
-        }
-        // Draw on this keystroke, from local data plus any completions already known.
-        renderSuggestions(for: text)
-        requestRemoteSuggestions(for: text)
-    }
-
-    /// Everything that can be shown without waiting: bookmarks, history, the literal
-    /// typed text, and cached (or carried-forward) engine completions.
-    private func renderSuggestions(for text: String) {
-        var results = AddressSuggestionProvider.local(for: text)
-        // The literal typed text always leads, so Return does what it looks like.
-        if let direct = URLResolver.resolve(text, privateSearch: isPrivate) {
-            let isSearch = URLDisplay.searchQuery(from: direct) != nil
-            results.insert(AddressSuggestion(kind: isSearch ? .search : .history,
-                                             title: text,
-                                             subtitle: isSearch ? "Search" : "Open",
-                                             url: direct), at: 0)
-        }
-
-        // Exact completions if we have them; otherwise keep showing the previous
-        // query's completions while they are still a plausible prefix, so the list
-        // stays populated as the user keeps typing.
-        var completions = AddressSuggestionProvider.cached(for: text)
-        if completions == nil, let previous = lastRemoteQuery,
-           text.lowercased().hasPrefix(previous.lowercased()) {
-            completions = lastRemoteItems
-        }
-        for completion in (completions ?? []).prefix(5) {
-            guard !results.contains(where: { $0.title.caseInsensitiveCompare(completion) == .orderedSame }),
-                  let url = URLResolver.resolve(completion, privateSearch: isPrivate) else { continue }
-            results.append(AddressSuggestion(kind: .search, title: completion, subtitle: nil, url: url))
-        }
-        suggestionsDropdown.show(results, below: urlField)
-    }
-
-    /// One request in flight at a time, no debounce. Typing while a request is out
-    /// records the newest query and fires it the moment the current one lands — which
-    /// keeps completions arriving continuously instead of only after a typing pause.
-    private func requestRemoteSuggestions(for text: String) {
-        if let hit = AddressSuggestionProvider.cached(for: text) {
-            lastRemoteQuery = text
-            lastRemoteItems = hit
-            return                                  // already rendered from cache
-        }
-        guard inFlightSuggestionQuery == nil else {
-            pendingSuggestionQuery = text
-            return
-        }
-        inFlightSuggestionQuery = text
-        AddressSuggestionProvider.remote(for: text, privateSearch: isPrivate) { [weak self] completions in
-            guard let self else { return }
-            self.inFlightSuggestionQuery = nil
-            if !completions.isEmpty {
-                self.lastRemoteQuery = text
-                self.lastRemoteItems = completions
-            }
-            let current = self.urlField.currentEditor()?.string ?? self.urlField.stringValue
-            if current == text, self.window?.firstResponder === self.urlField.currentEditor() {
-                self.renderSuggestions(for: current)
-            }
-            if let pending = self.pendingSuggestionQuery {
-                self.pendingSuggestionQuery = nil
-                if pending != text { self.requestRemoteSuggestions(for: pending) }
-            }
-        }
+        completer.update(for: urlField.currentEditor()?.string ?? urlField.stringValue)
     }
 
     private func configureToolbar() {
@@ -694,6 +627,18 @@ final class BrowserWindowController: NSWindowController {
 
     @objc func reloadPage(_ sender: Any?) {
         webView.reload()
+    }
+
+    /// Adds or removes this tab's site from the always-dark list. Removing works on
+    /// whichever listed site covers the page, so a subdomain can turn its parent off.
+    @objc func toggleSiteDarkMode(_ sender: Any?) {
+        if let listed = DarkMode.listedSite(for: webView.url) {
+            DarkMode.sites.remove(listed)
+            AppDelegate.shared.reapplyDarkMode(reloading: listed)
+        } else if let key = DarkMode.siteKey(for: webView.url) {
+            DarkMode.sites.insert(key)
+            AppDelegate.shared.reapplyDarkMode(reloading: key)
+        }
     }
 
     @objc func showFindBar(_ sender: Any?) {
@@ -1042,6 +987,12 @@ extension BrowserWindowController: NSMenuItemValidation {
             return webView.canGoForward
         case #selector(stopLoadingPage(_:)):
             return webView.isLoading
+        case #selector(toggleSiteDarkMode(_:)):
+            let key = DarkMode.siteKey(for: webView.url)
+            menuItem.title = key.map { "Dark Mode for \($0)" } ?? "Dark Mode for This Site"
+            menuItem.state = DarkMode.applies(to: webView.url) && key != nil ? .on : .off
+            // With every site already dark, there is nothing per-site to switch.
+            return key != nil && !DarkMode.isEnabled
         case #selector(findNext(_:)), #selector(findPrevious(_:)):
             return isFindBarVisible || !findBar.field.stringValue.isEmpty
         case #selector(hideFindBar(_:)):
@@ -1266,6 +1217,10 @@ extension BrowserWindowController: WKNavigationDelegate {
 
     /// Closes the previous visit the moment the tab starts going somewhere else — the
     /// dwell time this produces is what separates waypoints from real destinations.
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        DarkMode.updateAppearance(of: webView)
+    }
+
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         closeCurrentVisit()
         // The engine was injected into the outgoing document; it leaves with it.

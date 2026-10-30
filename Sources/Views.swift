@@ -555,37 +555,3 @@ final class BookmarksBarView: NSVisualEffectView, NSMenuItemValidation {
         return text.isEmpty ? nil : text
     }
 }
-
-/// Turns address-bar input into a URL: direct URLs load as-is, bare hosts get https://,
-/// everything else becomes a search query — Google normally, Brave Search (which
-/// doesn't profile searches) in incognito windows.
-enum URLResolver {
-    static func resolve(_ input: String, privateSearch: Bool = false) -> URL? {
-        let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return nil }
-
-        if let url = URL(string: text), let scheme = url.scheme?.lowercased(),
-           ["http", "https", "file", "about"].contains(scheme) {
-            return url
-        }
-
-        let looksLikeHost = !text.contains(" ")
-            && (text.contains(".") || text.hasPrefix("localhost"))
-        if looksLikeHost {
-            let scheme = text.hasPrefix("localhost") || text.hasPrefix("127.0.0.1") ? "http" : "https"
-            if let url = URL(string: "\(scheme)://\(text)") { return url }
-        }
-
-        var components = URLComponents(string: privateSearch
-            ? "https://search.brave.com/search" : "https://www.google.com/search")!
-        components.queryItems = [URLQueryItem(name: "q", value: text)]
-        return components.url
-    }
-}
-
-func htmlEscaped(_ string: String) -> String {
-    string
-        .replacingOccurrences(of: "&", with: "&amp;")
-        .replacingOccurrences(of: "<", with: "&lt;")
-        .replacingOccurrences(of: ">", with: "&gt;")
-}

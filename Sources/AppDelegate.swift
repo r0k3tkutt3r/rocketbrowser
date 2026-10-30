@@ -594,6 +594,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         ContentBlocker.shared.applyToAllWebViews?()
     }
 
+    @objc func toggleForceDarkMode(_ sender: Any?) {
+        DarkMode.isEnabled.toggle()
+        ContentBlocker.shared.applyToAllWebViews?()
+    }
+
+    /// After View ▸ Dark Mode for This Site: every tab gets the new site list for its next
+    /// load, and only the tabs showing that site reload now.
+    func reapplyDarkMode(reloading site: String) {
+        for controller in controllers {
+            ContentBlocker.shared.apply(to: controller.webView, isIncognito: controller.isPrivate)
+            guard let key = DarkMode.siteKey(for: controller.webView.url),
+                  key == site || key.hasSuffix("." + site) else { continue }
+            controller.webView.reload()
+        }
+    }
+
     @objc func toggleFingerprintProtection(_ sender: Any?) {
         PrivacyShield.isEnabled.toggle()
         ContentBlocker.shared.applyToAllWebViews?()
@@ -1362,6 +1378,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
                          action: #selector(BrowserWindowController.pageZoomOut(_:)),
                          keyEquivalent: "-")
         viewMenu.addItem(.separator())
+        viewMenu.addItem(withTitle: "Dark Mode for This Site",
+                         action: #selector(BrowserWindowController.toggleSiteDarkMode(_:)),
+                         keyEquivalent: "")
+        viewMenu.addItem(.separator())
         viewMenu.addItem(withTitle: "Hide Bookmarks Bar",
                          action: #selector(toggleBookmarksBar(_:)),
                          keyEquivalent: "B")
@@ -1449,6 +1469,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
                           keyEquivalent: "")
         toolsMenu.addItem(withTitle: "Hide Browser Install Prompts",
                           action: #selector(togglePromoBlocking(_:)),
+                          keyEquivalent: "")
+        toolsMenu.addItem(withTitle: "Dark Mode for All Websites",
+                          action: #selector(toggleForceDarkMode(_:)),
                           keyEquivalent: "")
         toolsMenu.addItem(withTitle: "Search Suggestions",
                           action: #selector(toggleSearchSuggestions(_:)),
@@ -1570,6 +1593,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         case #selector(togglePromoBlocking(_:)):
             menuItem.state = PromoBlocker.isEnabled ? .on : .off
             return true
+        case #selector(toggleForceDarkMode(_:)):
+            menuItem.state = DarkMode.isEnabled ? .on : .off
+            return true
+        case #selector(BrowserWindowController.toggleSiteDarkMode(_:)):
+            menuItem.title = "Dark Mode for This Site"
+            menuItem.state = .off
+            return false
         case #selector(resetWallpaper(_:)):
             return NewTabPage.wallpaperURL != nil
         case #selector(reopenClosedTab(_:)):

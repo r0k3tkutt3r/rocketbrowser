@@ -123,7 +123,7 @@ final class BookmarkStore {
         return true
     }
 
-    private static func firstItem(withID id: UUID, in list: [Bookmark]) -> Bookmark? {
+    static func firstItem(withID id: UUID, in list: [Bookmark]) -> Bookmark? {
         for item in list {
             if item.id == id { return item }
             if let children = item.children,

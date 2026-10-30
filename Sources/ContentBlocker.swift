@@ -85,10 +85,14 @@ final class ContentBlocker {
         // method wipes every user script, so a settings toggle must never be able to
         // strip autofill. The "Autofill Passwords" setting is checked natively when a
         // field reports focus — the script still has to run for the toolbar key button
-        // and for noticing a login worth saving.
+        // and for noticing a login worth saving. Mac only: the iOS app has no vault
+        // and leaves password AutoFill to the system keyboard.
+        #if os(macOS)
         for script in PasswordAutofill.userScripts() {
             userContent.addUserScript(script)
         }
+        DarkMode.apply(to: webView)
+        #endif
     }
 
     // MARK: - Compilation

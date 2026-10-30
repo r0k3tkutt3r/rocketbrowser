@@ -1,0 +1,332 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		7500E10A6B563C0F9AC76FBB /* AddressSuggestions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BC221D2B02427BE2EC74350 /* AddressSuggestions.swift */; };
+		E35A9F6BC552AA60C00D468E /* BookmarkStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87E4459E7C878C9689FCCB5F /* BookmarkStore.swift */; };
+		002CD68F2A3D4D22D7AE3E59 /* ContentBlocker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F9B96F65FA4DCEBEE72CD85 /* ContentBlocker.swift */; };
+		8F2AF4C65C36745B487C1A03 /* HistoryGrouping.swift in Sources */ = {isa = PBXBuildFile; fileRef = DBCAA1564EFB61B8E81E4EE6 /* HistoryGrouping.swift */; };
+		8B477ADA3D32282A4368D6BB /* HistoryRanker.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3A96583EE5D9DD8176AC8BA /* HistoryRanker.swift */; };
+		2AC536B9D80EA55D8C6703EE /* HistoryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1319DF48A782DD0AD5B1710C /* HistoryStore.swift */; };
+		825D34D31DD9E17207B58633 /* IncognitoSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F1DCCBA47EA1EC6778763E2 /* IncognitoSession.swift */; };
+		4271AC0EB74D44B762356EC0 /* NewTabPage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DCFA94FF408297F97C76E70 /* NewTabPage.swift */; };
+		3C98DAAF57DC9BAB1CBC97B6 /* PrivacyShield.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E7466D55FBFDBBD01ADF8B7 /* PrivacyShield.swift */; };
+		4512965B2E6748E9AB04BEFE /* PromoBlocker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33014732FE85A86E17FFAA5C /* PromoBlocker.swift */; };
+		7E05030E2D39BBB11944D1EE /* SessionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74F83685D968C87681A1E8C9 /* SessionStore.swift */; };
+		5BCC05C41EDCFB54EBE44054 /* SuggestionEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B4EE9CCE70569E0691D7E77 /* SuggestionEngine.swift */; };
+		9C7DC952881DAECDF61D6959 /* URLDisplay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 335AFA012C45BFB551C2CF70 /* URLDisplay.swift */; };
+		D0B5C5864F4B77C87041B838 /* WaypointDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 72C2B94AB27B85791A8CFA67 /* WaypointDetector.swift */; };
+		5227D3E7FB24F84A2088EA31 /* WaypointPreconnect.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3100FC5724FFB44F5CD23057 /* WaypointPreconnect.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		0BC221D2B02427BE2EC74350 /* AddressSuggestions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddressSuggestions.swift; sourceTree = "<group>"; };
+		87E4459E7C878C9689FCCB5F /* BookmarkStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookmarkStore.swift; sourceTree = "<group>"; };
+		3F9B96F65FA4DCEBEE72CD85 /* ContentBlocker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentBlocker.swift; sourceTree = "<group>"; };
+		DBCAA1564EFB61B8E81E4EE6 /* HistoryGrouping.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryGrouping.swift; sourceTree = "<group>"; };
+		B3A96583EE5D9DD8176AC8BA /* HistoryRanker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryRanker.swift; sourceTree = "<group>"; };
+		1319DF48A782DD0AD5B1710C /* HistoryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryStore.swift; sourceTree = "<group>"; };
+		9F1DCCBA47EA1EC6778763E2 /* IncognitoSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IncognitoSession.swift; sourceTree = "<group>"; };
+		8DCFA94FF408297F97C76E70 /* NewTabPage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewTabPage.swift; sourceTree = "<group>"; };
+		5E7466D55FBFDBBD01ADF8B7 /* PrivacyShield.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrivacyShield.swift; sourceTree = "<group>"; };
+		33014732FE85A86E17FFAA5C /* PromoBlocker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PromoBlocker.swift; sourceTree = "<group>"; };
+		74F83685D968C87681A1E8C9 /* SessionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionStore.swift; sourceTree = "<group>"; };
+		1B4EE9CCE70569E0691D7E77 /* SuggestionEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SuggestionEngine.swift; sourceTree = "<group>"; };
+		335AFA012C45BFB551C2CF70 /* URLDisplay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = URLDisplay.swift; sourceTree = "<group>"; };
+		72C2B94AB27B85791A8CFA67 /* WaypointDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WaypointDetector.swift; sourceTree = "<group>"; };
+		3100FC5724FFB44F5CD23057 /* WaypointPreconnect.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WaypointPreconnect.swift; sourceTree = "<group>"; };
+		D2A57DC1D883FD21FB995169 /* Rocket.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Rocket.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		BB5944C6515D6D2B678426AB /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		20F4BD606C0F6D1645AE4919 /* Rocket */ = {isa = PBXFileSystemSynchronizedRootGroup; path = Rocket; sourceTree = "<group>"; };
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		8F51EF3B9040A527832BEBBA /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		FAD58DE7366495DB4650CFEF = {
+			isa = PBXGroup;
+			children = (
+				20F4BD606C0F6D1645AE4919 /* Rocket */,
+				9E81E7B963C71363E2FB3EEF /* Shared */,
+				BB5944C6515D6D2B678426AB /* Info.plist */,
+				86024CAD1E83101D97359D73 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		9E81E7B963C71363E2FB3EEF /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				0BC221D2B02427BE2EC74350 /* AddressSuggestions.swift */,
+				87E4459E7C878C9689FCCB5F /* BookmarkStore.swift */,
+				3F9B96F65FA4DCEBEE72CD85 /* ContentBlocker.swift */,
+				DBCAA1564EFB61B8E81E4EE6 /* HistoryGrouping.swift */,
+				B3A96583EE5D9DD8176AC8BA /* HistoryRanker.swift */,
+				1319DF48A782DD0AD5B1710C /* HistoryStore.swift */,
+				9F1DCCBA47EA1EC6778763E2 /* IncognitoSession.swift */,
+				8DCFA94FF408297F97C76E70 /* NewTabPage.swift */,
+				5E7466D55FBFDBBD01ADF8B7 /* PrivacyShield.swift */,
+				33014732FE85A86E17FFAA5C /* PromoBlocker.swift */,
+				74F83685D968C87681A1E8C9 /* SessionStore.swift */,
+				1B4EE9CCE70569E0691D7E77 /* SuggestionEngine.swift */,
+				335AFA012C45BFB551C2CF70 /* URLDisplay.swift */,
+				72C2B94AB27B85791A8CFA67 /* WaypointDetector.swift */,
+				3100FC5724FFB44F5CD23057 /* WaypointPreconnect.swift */,
+			);
+			name = Shared;
+			path = ../Sources;
+			sourceTree = "<group>";
+		};
+		86024CAD1E83101D97359D73 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				D2A57DC1D883FD21FB995169 /* Rocket.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		42AEFBAE01D2DFD981F7DA7D /* Rocket */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = FDF364E1380B97A6B748142A /* Build configuration list for PBXNativeTarget "Rocket" */;
+			buildPhases = (
+				BAEC6461B0D69DDE1B861AEF /* Render App Icon */,
+				25D902C24283AB8CFBAC54DF /* Sources */,
+				8F51EF3B9040A527832BEBBA /* Frameworks */,
+				9B207167E5381C47682C6B4F /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				20F4BD606C0F6D1645AE4919 /* Rocket */,
+			);
+			name = Rocket;
+			productName = Rocket;
+			productReference = D2A57DC1D883FD21FB995169 /* Rocket.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		46F86FAA6BBF9AC94A7E4595 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2700;
+				LastUpgradeCheck = 2700;
+				TargetAttributes = {
+					42AEFBAE01D2DFD981F7DA7D = {
+						CreatedOnToolsVersion = 27.0;
+					};
+				};
+			};
+			buildConfigurationList = FB0A9E0824BEDFF6DE8AA308 /* Build configuration list for PBXProject "Rocket" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = FAD58DE7366495DB4650CFEF;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 86024CAD1E83101D97359D73 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				42AEFBAE01D2DFD981F7DA7D /* Rocket */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		9B207167E5381C47682C6B4F /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		BAEC6461B0D69DDE1B861AEF /* Render App Icon */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/../Tools/AppIcon.swift",
+				"$(SRCROOT)/../Tools/MakeIcon.swift",
+			);
+			name = "Render App Icon";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(SRCROOT)/Rocket/Assets.xcassets/AppIcon.appiconset/AppIcon.png",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "# Renders the icon from Tools/AppIcon.swift, the code that draws the Mac icon, so the\n# repo still ships no image assets. The tool uses AppKit, so it is built for this Mac:\n# SDKROOT is cleared because Xcode points it at the iOS SDK for this target.\nset -e\nTOOL=\"$DERIVED_FILE_DIR/makeicon\"\nenv -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET xcrun -sdk macosx swiftc -O -swift-version 5 \\\n    -target \"$(uname -m)-apple-macos14.0\" \\\n    \"$SRCROOT/../Tools/AppIcon.swift\" \"$SRCROOT/../Tools/MakeIcon.swift\" -o \"$TOOL\"\n\"$TOOL\" --ios \"$SRCROOT/Rocket/Assets.xcassets/AppIcon.appiconset/AppIcon.png\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		25D902C24283AB8CFBAC54DF /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				7500E10A6B563C0F9AC76FBB /* AddressSuggestions.swift in Sources */,
+				E35A9F6BC552AA60C00D468E /* BookmarkStore.swift in Sources */,
+				002CD68F2A3D4D22D7AE3E59 /* ContentBlocker.swift in Sources */,
+				8F2AF4C65C36745B487C1A03 /* HistoryGrouping.swift in Sources */,
+				8B477ADA3D32282A4368D6BB /* HistoryRanker.swift in Sources */,
+				2AC536B9D80EA55D8C6703EE /* HistoryStore.swift in Sources */,
+				825D34D31DD9E17207B58633 /* IncognitoSession.swift in Sources */,
+				4271AC0EB74D44B762356EC0 /* NewTabPage.swift in Sources */,
+				3C98DAAF57DC9BAB1CBC97B6 /* PrivacyShield.swift in Sources */,
+				4512965B2E6748E9AB04BEFE /* PromoBlocker.swift in Sources */,
+				7E05030E2D39BBB11944D1EE /* SessionStore.swift in Sources */,
+				5BCC05C41EDCFB54EBE44054 /* SuggestionEngine.swift in Sources */,
+				9C7DC952881DAECDF61D6959 /* URLDisplay.swift in Sources */,
+				D0B5C5864F4B77C87041B838 /* WaypointDetector.swift in Sources */,
+				5227D3E7FB24F84A2088EA31 /* WaypointPreconnect.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		A4B7B349CA0ACE3E9B30071C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		9013464F9C54D6D1AA6CBF42 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_VERSION = 5.0;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		151C9AB13273168A233A4CC1 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = HWWPT38672;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.kushmodi.rocket.ios;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		D2CDCE9009DA96D460327094 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = HWWPT38672;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.kushmodi.rocket.ios;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		FB0A9E0824BEDFF6DE8AA308 /* Build configuration list for PBXProject "Rocket" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A4B7B349CA0ACE3E9B30071C /* Debug */,
+				9013464F9C54D6D1AA6CBF42 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		FDF364E1380B97A6B748142A /* Build configuration list for PBXNativeTarget "Rocket" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				151C9AB13273168A233A4CC1 /* Debug */,
+				D2CDCE9009DA96D460327094 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 46F86FAA6BBF9AC94A7E4595 /* Project object */;
+}

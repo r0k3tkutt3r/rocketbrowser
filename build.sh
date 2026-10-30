@@ -7,14 +7,45 @@ APP_NAME="Rocket"
 APP="build/$APP_NAME.app"
 ARCH="$(uname -m)"
 
-# ./build.sh [--install | --notarize]
+# ./build.sh [--install | --notarize | --phone | --both]
+#   --phone  build the iOS app and install it on the connected iPhone (no Mac build)
+#   --both   --install on this Mac, then --phone
 ACTION=""
+MAC=1
+PHONE=0
 for arg in "$@"; do
     case "$arg" in
         --install|--notarize) ACTION="$arg" ;;
+        --phone) MAC=0; PHONE=1 ;;
+        --both) ACTION="--install"; PHONE=1 ;;
         *) echo "unknown option: $arg" >&2; exit 1 ;;
     esac
 done
+
+# The first paired iPhone that is reachable (USB or Wi-Fi); ROCKET_DEVICE overrides.
+build_phone() {
+    local device="${ROCKET_DEVICE:-$(xcrun devicectl list devices 2>/dev/null \
+        | awk '/physical/ && /available/' | grep -Eo '[0-9A-F]{8}-[0-9A-F]{16}' | head -1)}"
+    if [[ -z "$device" ]]; then
+        echo "error: no paired iPhone available — connect it, unlock it, and try again." >&2
+        exit 1
+    fi
+    xcodebuild -project iOS/Rocket.xcodeproj -scheme Rocket -configuration Release \
+        -destination 'generic/platform=iOS' -allowProvisioningUpdates \
+        -derivedDataPath build/ios -quiet build
+    xcrun devicectl device install app --device "$device" \
+        build/ios/Build/Products/Release-iphoneos/Rocket.app >/dev/null
+    # Relaunch so the phone runs this build, not the copy that was already open.
+    xcrun devicectl device process launch --device "$device" --terminate-existing \
+        com.kushmodi.rocket.ios >/dev/null 2>&1 \
+        || echo "note: installed, but could not relaunch — the phone may be locked"
+    echo "Installed on iPhone $device"
+}
+
+if (( ! MAC )); then
+    build_phone
+    exit 0
+fi
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -137,4 +168,8 @@ else
     echo "Run with: open $APP"
     echo "Install with: ./build.sh --install"
     echo "Notarize for distribution: ./build.sh --notarize"
+fi
+
+if (( PHONE )); then
+    build_phone
 fi

@@ -73,6 +73,8 @@ enum NewTabPage {
     <html>
     <head>
     <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+    <meta name="theme-color" content="#0b0b10">
     <title>Incognito</title>
     <style>
         html, body { height: 100%; margin: 0; }
@@ -96,8 +98,8 @@ enum NewTabPage {
         <div class="glasses">🕶</div>
         <h1>Incognito Mode</h1>
         <p>Pages you view here leave no trace in Rocket. Cookies and site data live
-           in a private store that is permanently deleted the moment you close this
-           window, and nothing here can touch your normal browsing.</p>
+           in a private store that is permanently deleted the moment you leave
+           incognito, and nothing here can touch your normal browsing.</p>
         <ul>
             <li>Ads &amp; trackers blocked, always</li>
             <li>Fingerprinting defenses on — screen, hardware &amp; storage hidden</li>
@@ -144,6 +146,8 @@ enum NewTabPage {
         <html>
         <head>
         <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+        <meta name="theme-color" content="#1c1240">
         <title>New Tab</title>
         <style>
             html, body { height: 100%; margin: 0; }
@@ -170,6 +174,8 @@ enum NewTabPage {
                     cursor: pointer; backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
                     text-shadow: none; transition: background .15s; }
             .chip:hover { background: rgba(255,255,255,.30); }
+            /* Phones: the Mac-sized clock is wider than the screen. */
+            @media (max-width: 500px) { .time { font-size: 64px; } }
         </style>
         </head>
         <body>
