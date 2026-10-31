@@ -20,6 +20,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     private let securityMenu = NSMenu(title: "Download Scanning")
     private let passwordsMenu = NSMenu(title: "Passwords")
     private let activityMenu = NSMenu(title: "Tab Activity")
+    private let readAloudMenu = NSMenu(title: "Read Aloud")
     private let watchesMenu = NSMenu(title: "Watches")
     private let compareMenu = NSMenu(title: "Compare")
     /// The launch notification for changed watches, held while it is on screen.
@@ -742,7 +743,82 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
             rebuildWatchesMenu()
         } else if menu === compareMenu {
             rebuildCompareMenu()
+        } else if menu === readAloudMenu {
+            rebuildReadAloudMenu()
         }
+    }
+
+    /// Before the engine is installed, the menu is the way to get it and says what it
+    /// costs; afterwards it holds the voices and the way to give the space back.
+    private func rebuildReadAloudMenu() {
+        readAloudMenu.removeAllItems()
+        let sizes = ByteCountFormatter()
+        if let progress = ReadAloudEngine.progress {
+            readAloudMenu.addItem(withTitle: "Downloading… \(Int(progress * 100))%", action: nil, keyEquivalent: "").isEnabled = false
+            readAloudMenu.addItem(withTitle: "Cancel Download", action: #selector(cancelReadAloudDownload(_:)), keyEquivalent: "")
+        } else if ReadAloud.isAvailable {
+            for voice in ReadAloud.Voice.allCases {
+                let item = readAloudMenu.addItem(withTitle: voice.title,
+                                                 action: #selector(setReadAloudVoice(_:)), keyEquivalent: "")
+                item.representedObject = voice.rawValue
+            }
+            readAloudMenu.addItem(.separator())
+            readAloudMenu.addItem(withTitle: "Remove Read Aloud (\(sizes.string(fromByteCount: ReadAloudEngine.bytesOnDisk)))…",
+                                  action: #selector(removeReadAloud(_:)), keyEquivalent: "")
+        } else if let release = ReadAloudEngine.release {
+            readAloudMenu.addItem(withTitle: "Download Read Aloud (\(sizes.string(fromByteCount: release.downloadBytes)))…",
+                                  action: #selector(downloadReadAloud(_:)), keyEquivalent: "")
+            readAloudMenu.addItem(withTitle: "Uses \(sizes.string(fromByteCount: release.installedBytes)) on disk, plus about 360 MB of voice model",
+                                  action: nil, keyEquivalent: "").isEnabled = false
+        }
+    }
+
+    @objc func downloadReadAloud(_ sender: Any?) {
+        guard let release = ReadAloudEngine.release else { return }
+        let sizes = ByteCountFormatter()
+        let alert = NSAlert()
+        alert.messageText = "Download Read Aloud?"
+        alert.informativeText = """
+        Read Aloud speaks selected text in a natural voice, entirely on this Mac. \
+        The engine is a \(sizes.string(fromByteCount: release.downloadBytes)) download and takes \
+        \(sizes.string(fromByteCount: release.installedBytes)) on disk. The first time you use it, it also \
+        downloads its voice model, about 210 MB, which grows to about 360 MB once prepared.
+
+        Remove it any time from Tools ▸ Read Aloud.
+        """
+        alert.addButton(withTitle: "Download")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        ReadAloudEngine.install { error in
+            let done = NSAlert()
+            if let error {
+                done.alertStyle = .warning
+                done.messageText = "Read Aloud couldn’t be installed"
+                done.informativeText = error.localizedDescription
+            } else {
+                done.messageText = "Read Aloud is ready"
+                done.informativeText = "Select text on a page, right-click it and choose Read Aloud."
+            }
+            done.runModal()
+        }
+    }
+
+    @objc func cancelReadAloudDownload(_ sender: Any?) {
+        ReadAloudEngine.cancel()
+    }
+
+    @objc func removeReadAloud(_ sender: Any?) {
+        let alert = NSAlert()
+        alert.messageText = "Remove Read Aloud?"
+        alert.informativeText = """
+        This deletes the engine and its voice model \
+        (\(ByteCountFormatter().string(fromByteCount: ReadAloudEngine.bytesOnDisk))). \
+        You can download it again from Tools ▸ Read Aloud.
+        """
+        alert.addButton(withTitle: "Remove")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        ReadAloudEngine.remove()
     }
 
     /// One row per comparison, cheapest value alongside. The page is where a comparison
@@ -1491,15 +1567,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         toolsMenu.addItem(withTitle: "Restore Tabs on Launch",
                           action: #selector(toggleSessionRestore(_:)),
                           keyEquivalent: "")
-        if ReadAloud.isAvailable {
-            let voiceMenu = NSMenu(title: "Read Aloud Voice")
-            for voice in ReadAloud.Voice.allCases {
-                let item = voiceMenu.addItem(withTitle: voice.title,
-                                             action: #selector(setReadAloudVoice(_:)), keyEquivalent: "")
-                item.representedObject = voice.rawValue
-            }
-            let voiceParent = toolsMenu.addItem(withTitle: "Read Aloud Voice", action: nil, keyEquivalent: "")
-            toolsMenu.setSubmenu(voiceMenu, for: voiceParent)
+        if ReadAloudEngine.isOffered {
+            readAloudMenu.delegate = self
+            let readAloudParent = toolsMenu.addItem(withTitle: "Read Aloud", action: nil, keyEquivalent: "")
+            toolsMenu.setSubmenu(readAloudMenu, for: readAloudParent)
         }
         toolsMenu.addItem(.separator())
         let downloadsItem = toolsMenu.addItem(withTitle: "Show Downloads",

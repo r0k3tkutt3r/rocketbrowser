@@ -1,0 +1,4 @@
+url=https://github.com/r0k3tkutt3r/rocketbrowser/releases/download/speech-7f7361c4a41b/RocketSpeech.zip
+sha256=7f7361c4a41b22634dc6a6c5a73238470599f2b6b0a3f5fa8f9401bc231bd506
+download_bytes=12905365
+installed_bytes=36855808

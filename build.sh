@@ -7,15 +7,19 @@ APP_NAME="Rocket"
 APP="build/$APP_NAME.app"
 ARCH="$(uname -m)"
 
-# ./build.sh [--install | --notarize | --phone | --both]
-#   --phone  build the iOS app and install it on the connected iPhone (no Mac build)
-#   --both   --install on this Mac, then --phone
+# ./build.sh [--install | --notarize | --phone | --both] [--speech]
+#   --phone   build the iOS app and install it on the connected iPhone (no Mac build)
+#   --both    --install on this Mac, then --phone
+#   --speech  also package the Read Aloud engine as build/RocketSpeech.zip and pin it
+#             in Helpers/RocketSpeech/release.txt (see below)
 ACTION=""
 MAC=1
 PHONE=0
+SPEECH=0
 for arg in "$@"; do
     case "$arg" in
         --install|--notarize) ACTION="$arg" ;;
+        --speech) SPEECH=1 ;;
         --phone) MAC=0; PHONE=1 ;;
         --both) ACTION="--install"; PHONE=1 ;;
         *) echo "unknown option: $arg" >&2; exit 1 ;;
@@ -113,24 +117,19 @@ sign_bundle() {
     fi
 }
 
-# Read Aloud's engine: Helpers/RocketSpeech, a SwiftPM package (the one third-party
-# dependency, kokoro-coreml) built into its own process. The first build fetches the
-# package and needs the Metal toolchain (`xcodebuild -downloadComponent MetalToolchain`);
-# if it cannot build, Rocket ships without Read Aloud rather than failing the build.
-# SwiftPM resource bundles and libMisakiSwift.dylib are looked up next to the
-# executable, so the folder is copied whole.
-HELPER="$APP/Contents/Helpers/RocketSpeech"
-if swift build -c release --package-path Helpers/RocketSpeech >build/speech.log 2>&1; then
-    BIN="$(swift build -c release --package-path Helpers/RocketSpeech --show-bin-path)"
-    mkdir -p "$HELPER"
-    for f in "$BIN/rocket-speech" "$BIN/libMisakiSwift.dylib" "$BIN"/*.bundle; do
-        ditto "$f" "$HELPER/${f:t}"
-    done
-else
-    echo "warning: the Read Aloud helper did not build (build/speech.log); Rocket ships without it."
-fi
+# Read Aloud's engine is not in the app: it is 38 MB in a 14 MB browser, so it is a
+# download from Tools ▸ Read Aloud instead. Helpers/RocketSpeech is a SwiftPM package
+# (the one third-party dependency, kokoro-coreml); `--speech` builds it, strips and
+# signs it, zips it to build/RocketSpeech.zip, and writes release.txt — the URL the
+# app fetches it from, the zip's SHA-256 and both sizes. Every build copies those into
+# Info.plist, which the app's signature seals, so the app runs only the exact archive
+# it was built against. The URL's tag carries the hash, so a new engine never
+# replaces the file an older Rocket points at. First builds need the network and the
+# Metal toolchain (`xcodebuild -downloadComponent MetalToolchain`).
+SPEECH_RELEASE="Helpers/RocketSpeech/release.txt"
+SPEECH_REPO="r0k3tkutt3r/rocketbrowser"
 
-# Nested code is signed inside-out, before the app that seals it.
+# Nested code is signed inside-out.
 sign_nested() {
     if [[ -n "$SIGN_ID" ]]; then
         codesign --force --sign "$SIGN_ID" --options runtime --timestamp "$1"
@@ -140,10 +139,46 @@ sign_nested() {
         codesign --force --sign - "$1"
     fi
 }
-if [[ -d "$HELPER" ]]; then
-    for f in "$HELPER"/*.bundle "$HELPER/libMisakiSwift.dylib" "$HELPER/rocket-speech"; do
+if (( SPEECH )); then
+    swift build -c release --package-path Helpers/RocketSpeech >build/speech.log 2>&1 \
+        || { echo "error: the Read Aloud engine did not build (build/speech.log)" >&2; exit 1; }
+    BIN="$(swift build -c release --package-path Helpers/RocketSpeech --show-bin-path)"
+    SPEECH_DIR="$STAGING/RocketSpeech"
+    mkdir -p "$SPEECH_DIR"
+    # SwiftPM resource bundles and libMisakiSwift.dylib are looked up next to the
+    # executable, so the folder travels whole.
+    for f in "$BIN/rocket-speech" "$BIN/libMisakiSwift.dylib" "$BIN"/*.bundle; do
+        ditto "$f" "$SPEECH_DIR/${f:t}"
+    done
+    # -x keeps the exported symbols the executable links against; the rest is debug
+    # symbols, 11 MB of the dylib's 24.
+    strip -x "$SPEECH_DIR/libMisakiSwift.dylib" "$SPEECH_DIR/rocket-speech"
+    for f in "$SPEECH_DIR"/*.bundle "$SPEECH_DIR/libMisakiSwift.dylib" "$SPEECH_DIR/rocket-speech"; do
         sign_nested "$f"
     done
+    ditto -c -k --keepParent "$SPEECH_DIR" build/RocketSpeech.zip
+    SHA="$(shasum -a 256 build/RocketSpeech.zip | cut -d' ' -f1)"
+    cat > "$SPEECH_RELEASE" <<EOF2
+url=https://github.com/$SPEECH_REPO/releases/download/speech-${SHA[1,12]}/RocketSpeech.zip
+sha256=$SHA
+download_bytes=$(stat -f %z build/RocketSpeech.zip)
+installed_bytes=$(( $(du -sk "$SPEECH_DIR" | cut -f1) * 1024 ))
+EOF2
+    echo "Packaged build/RocketSpeech.zip. Publish it with:"
+    echo "  gh release create speech-${SHA[1,12]} build/RocketSpeech.zip --repo $SPEECH_REPO --title 'Read Aloud engine ${SHA[1,12]}' --notes 'Downloaded by Rocket from Tools ▸ Read Aloud.'"
+fi
+if [[ -f "$SPEECH_RELEASE" ]]; then
+    PLIST="$APP/Contents/Info.plist"
+    while IFS='=' read -r key value; do
+        case "$key" in
+            url) /usr/libexec/PlistBuddy -c "Add :RocketSpeechURL string $value" "$PLIST" ;;
+            sha256) /usr/libexec/PlistBuddy -c "Add :RocketSpeechSHA256 string $value" "$PLIST" ;;
+            download_bytes) /usr/libexec/PlistBuddy -c "Add :RocketSpeechDownloadBytes integer $value" "$PLIST" ;;
+            installed_bytes) /usr/libexec/PlistBuddy -c "Add :RocketSpeechInstalledBytes integer $value" "$PLIST" ;;
+        esac
+    done < "$SPEECH_RELEASE"
+else
+    echo "warning: no $SPEECH_RELEASE — this build cannot offer Read Aloud (run ./build.sh --speech)."
 fi
 
 if [[ -z "$SIGN_ID" ]]; then

@@ -3,7 +3,7 @@ import AVFoundation
 
 /// Right-click ▸ Read Aloud: selected text spoken by Kokoro-82M, on this Mac.
 ///
-/// The model runs in `rocket-speech`, a helper process in Contents/Helpers, because the
+/// The model runs in `rocket-speech`, a helper process `ReadAloudEngine` downloads, because the
 /// fastest port on Apple Silicon (kokoro-coreml: Neural Engine + GPU) is a Swift package
 /// and Rocket itself is a dependency-free swiftc build. Measured on an M2 Air: a cold
 /// helper loads in ~0.4 s and the first audio plays ~0.9 s after the click; warm, 19 s
@@ -16,10 +16,9 @@ import AVFoundation
 final class ReadAloud {
     static let shared = ReadAloud()
 
-    static let helperURL = Bundle.main.bundleURL
-        .appendingPathComponent("Contents/Helpers/RocketSpeech/rocket-speech")
+    static var helperURL: URL { ReadAloudEngine.directory.appendingPathComponent("rocket-speech") }
 
-    /// The helper needs macOS 15, and build.sh skips it when SwiftPM cannot build it.
+    /// The helper needs macOS 15 and is downloaded from Tools ▸ Read Aloud.
     static var isAvailable: Bool {
         guard #available(macOS 15, *) else { return false }
         return FileManager.default.isExecutableFile(atPath: helperURL.path)
@@ -100,6 +99,16 @@ final class ReadAloud {
         requestID += 1
         send(["id": requestID, "text": ""])
         finish()
+    }
+
+    /// Ends the helper outright, for removing the engine from under it.
+    func shutDown() {
+        stop()
+        idleTimer?.invalidate()
+        try? input?.close()
+        input = nil
+        process?.terminate()
+        process = nil
     }
 
     // MARK: - Helper process
@@ -231,6 +240,129 @@ final class ReadAloud {
         let pill = ReadAloudPill { [weak self] in self?.stop() }
         pill.attach(to: view)
         self.pill = pill
+    }
+}
+
+/// Read Aloud's engine is a download rather than part of the app: 38 MB of helper,
+/// dylib and pronunciation dictionaries in a 14 MB browser, for a feature many people
+/// never use. build.sh pins the archive's URL, SHA-256 and sizes into Info.plist, which
+/// the app's own signature seals, and nothing is unpacked unless the downloaded bytes
+/// hash to exactly that — this is code Rocket will run, so a swapped release asset or
+/// a tampered mirror must be refused, not trusted on TLS alone.
+enum ReadAloudEngine {
+    struct Release {
+        let url: URL
+        let sha256: String
+        let downloadBytes: Int64
+        let installedBytes: Int64
+    }
+
+    /// Nil when this build was made without `./build.sh --speech` ever having run.
+    static let release: Release? = {
+        let info = Bundle.main.infoDictionary ?? [:]
+        guard let url = (info["RocketSpeechURL"] as? String).flatMap(URL.init(string:)),
+              let sha = info["RocketSpeechSHA256"] as? String else { return nil }
+        return Release(url: url, sha256: sha.lowercased(),
+                       downloadBytes: (info["RocketSpeechDownloadBytes"] as? NSNumber)?.int64Value ?? 0,
+                       installedBytes: (info["RocketSpeechInstalledBytes"] as? NSNumber)?.int64Value ?? 0)
+    }()
+
+    static var isOffered: Bool {
+        guard #available(macOS 15, *) else { return false }
+        return release != nil
+    }
+
+    static let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("Rocket/RocketSpeech", isDirectory: true)
+    /// Where the helper keeps the voice model it downloads on first use.
+    static let caches = ["kokoro-coreml", "kokoro-coreml-rocket"].map {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent($0)
+    }
+
+    private(set) static var task: URLSessionDownloadTask?
+    static var progress: Double? { task.map { $0.progress.fractionCompleted } }
+
+    enum Failure: LocalizedError {
+        case server(Int), mismatch, unpack
+        var errorDescription: String? {
+            switch self {
+            case .server(let code): return "The server answered \(code)."
+            case .mismatch: return "The download did not match the engine this version of Rocket expects, so it was discarded."
+            case .unpack: return "The download could not be unpacked."
+            }
+        }
+    }
+
+    static func install(completion: @escaping (Error?) -> Void) {
+        guard task == nil, let release else { return }
+        let task = URLSession.shared.downloadTask(with: release.url) { file, response, error in
+            // The temporary file is deleted when this closure returns, so everything
+            // that reads it happens here, off main.
+            let result: Error? = {
+                if let error { return error }
+                if let http = response as? HTTPURLResponse, http.statusCode != 200 { return Failure.server(http.statusCode) }
+                guard let file, VirusTotal.sha256(of: file) == release.sha256 else { return Failure.mismatch }
+                return unpack(file)
+            }()
+            DispatchQueue.main.async {
+                Self.task = nil
+                // A cancel is the user's own doing, not news.
+                if (result as? URLError)?.code == .cancelled { return }
+                completion(result)
+            }
+        }
+        Self.task = task
+        task.resume()
+    }
+
+    static func cancel() { task?.cancel() }
+
+    /// Unpacks beside the destination and swaps it in whole, so an interrupted unpack
+    /// never leaves a half-installed helper that `isAvailable` would believe in.
+    private static func unpack(_ zip: URL) -> Error? {
+        let fm = FileManager.default
+        let parent = directory.deletingLastPathComponent()
+        let staging = parent.appendingPathComponent(".RocketSpeech-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: staging) }
+        do {
+            try fm.createDirectory(at: staging, withIntermediateDirectories: true)
+            let ditto = Process()
+            ditto.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+            ditto.arguments = ["-x", "-k", zip.path, staging.path]
+            try ditto.run()
+            ditto.waitUntilExit()
+            let unpacked = staging.appendingPathComponent("RocketSpeech")
+            guard ditto.terminationStatus == 0,
+                  fm.isExecutableFile(atPath: unpacked.appendingPathComponent("rocket-speech").path) else { return Failure.unpack }
+            try? fm.removeItem(at: directory)
+            try fm.moveItem(at: unpacked, to: directory)
+            return nil
+        } catch {
+            return error
+        }
+    }
+
+    /// The engine and the voice model it downloaded: everything Read Aloud put on disk.
+    static func remove() {
+        ReadAloud.shared.shutDown()
+        for url in [directory] + caches { try? FileManager.default.removeItem(at: url) }
+    }
+
+    /// Counted per file, not per path: the helper's voice cache is built from hard
+    /// links to the starter model, and summing paths reported 600 MB for 365.
+    static var bytesOnDisk: Int64 {
+        let keys: Set<URLResourceKey> = [.totalFileAllocatedSizeKey, .fileResourceIdentifierKey]
+        var seen = Set<NSObject>()
+        var total: Int64 = 0
+        for root in [directory] + caches {
+            guard let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: Array(keys)) else { continue }
+            for case let file as URL in files {
+                guard let values = try? file.resourceValues(forKeys: keys),
+                      let id = values.fileResourceIdentifier as? NSObject, seen.insert(id).inserted else { continue }
+                total += Int64(values.totalFileAllocatedSize ?? 0)
+            }
+        }
+        return total
     }
 }
 
