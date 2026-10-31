@@ -594,6 +594,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         ContentBlocker.shared.applyToAllWebViews?()
     }
 
+    /// Takes effect from the next Read Aloud; a passage already playing finishes as it is.
+    @objc func setReadAloudVoice(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let voice = ReadAloud.Voice(rawValue: raw) else { return }
+        ReadAloud.voice = voice
+    }
+
     @objc func toggleForceDarkMode(_ sender: Any?) {
         DarkMode.isEnabled.toggle()
         ContentBlocker.shared.applyToAllWebViews?()
@@ -1485,6 +1491,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         toolsMenu.addItem(withTitle: "Restore Tabs on Launch",
                           action: #selector(toggleSessionRestore(_:)),
                           keyEquivalent: "")
+        if ReadAloud.isAvailable {
+            let voiceMenu = NSMenu(title: "Read Aloud Voice")
+            for voice in ReadAloud.Voice.allCases {
+                let item = voiceMenu.addItem(withTitle: voice.title,
+                                             action: #selector(setReadAloudVoice(_:)), keyEquivalent: "")
+                item.representedObject = voice.rawValue
+            }
+            let voiceParent = toolsMenu.addItem(withTitle: "Read Aloud Voice", action: nil, keyEquivalent: "")
+            toolsMenu.setSubmenu(voiceMenu, for: voiceParent)
+        }
         toolsMenu.addItem(.separator())
         let downloadsItem = toolsMenu.addItem(withTitle: "Show Downloads",
                                               action: #selector(showDownloadsWindow(_:)),
@@ -1629,6 +1645,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
             return true
         case #selector(togglePreconnect(_:)):
             menuItem.state = WaypointPreconnect.isEnabled ? .on : .off
+            return true
+        case #selector(setReadAloudVoice(_:)):
+            menuItem.state = menuItem.representedObject as? String == ReadAloud.voice.rawValue ? .on : .off
             return true
         case #selector(setScanPolicy(_:)):
             let policies: [Int: ScanPolicy] = [0: .off, 1: .riskyOrLarge, 2: .everything]

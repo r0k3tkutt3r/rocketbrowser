@@ -70,7 +70,39 @@ enum PasswordAutofill {
             var autocomplete = (el.getAttribute('autocomplete') || '').toLowerCase();
             // A one-time code or a card field is never a username.
             if (autocomplete.indexOf('one-time-code') >= 0 || autocomplete.indexOf('cc-') >= 0) { return false; }
+            // Nor is a search box: Hugging Face's says "Search models, datasets, users…",
+            // which reads as a username to the hint test below.
+            if (isSearchField(el)) { return false; }
             return isVisible(el);
+        }
+        function isSearchField(el) {
+            if (el.getAttribute('role') === 'searchbox' || el.closest('[role=search], search')) { return true; }
+            if ((el.getAttribute('enterkeyhint') || '').toLowerCase() === 'search') { return true; }
+            var hint = ((el.name || '') + ' ' + (el.id || '') + ' ' + (el.getAttribute('placeholder') || '')
+                + ' ' + (el.getAttribute('aria-label') || '') + ' ' + (el.className || '')).toLowerCase();
+            return el.name === 'q' || /search|query/.test(hint);
+        }
+        // Sign-up pages usually have ONE password box and no autocomplete hint, so the
+        // two-box test alone missed most of them and "Use Strong Password" never showed.
+        // Only the form itself and the page's own path count: a login page's "Sign up"
+        // link must not turn it into a sign-up form.
+        var signUpWords = /sign[ _-]?up|register|registration|create[ _-]?(an[ _-]?)?account|new[ _-]?account|join|get started|enroll/i;
+        function looksLikeSignUp(group, form) {
+            // A page that says current-password means it, and "confirm" in a box that
+            // guards "Delete account" is no reason to offer a new password.
+            if (group.some(function (p) { return /current-password/i.test(p.getAttribute('autocomplete') || ''); })) { return false; }
+            var fieldHints = group.some(function (p) {
+                return /new|create|confirm|choose|sign[ _-]?up|regist/i.test(
+                    (p.name || '') + ' ' + (p.id || '') + ' ' + (p.getAttribute('placeholder') || '')
+                    + ' ' + (p.getAttribute('aria-label') || ''));
+            });
+            if (fieldHints) { return true; }
+            if (/\/(sign[_-]?up|register|join|create[_-]?account|registration)\b/i.test(location.pathname)) { return true; }
+            if (!form) { return false; }
+            if (signUpWords.test((form.getAttribute('action') || '') + ' ' + (form.id || '') + ' ' + (form.className || ''))) { return true; }
+            return Array.prototype.some.call(form.querySelectorAll('button, input[type=submit]'), function (b) {
+                return (b.type === 'submit' || b.tagName === 'INPUT') && signUpWords.test(b.textContent || b.value || '');
+            });
         }
         function looksLikeUsername(el) {
             var autocomplete = (el.getAttribute('autocomplete') || '').toLowerCase();
@@ -125,7 +157,7 @@ enum PasswordAutofill {
                 var isSignUp = group.length >= 2 || group.some(function (p) {
                     // A token list: "section-signup new-password" is valid and must count.
                     return (p.getAttribute('autocomplete') || '').toLowerCase().split(/\s+/).indexOf('new-password') >= 0;
-                });
+                }) || looksLikeSignUp(group, form);
                 var user = usernameFor(group[0]);
                 records.push({ form: form, password: group[0], passwords: group,
                                username: user, isSignUp: isSignUp,

@@ -31,8 +31,27 @@ final class RocketWebView: WKWebView {
                      keyEquivalent: "")
     }
 
+    /// Read Aloud sits right under WebKit's plain Copy, which WebKit offers only when
+    /// there is selected text (links and images get Copy Link / Copy Image instead).
+    static func addReadAloudItem(to menu: NSMenu) {
+        if ReadAloud.shared.isActive {
+            menu.insertItem(withTitle: "Stop Reading",
+                            action: #selector(BrowserWindowController.stopReadingAloud(_:)),
+                            keyEquivalent: "", at: 0)
+            menu.insertItem(.separator(), at: 1)
+        }
+        guard ReadAloud.isAvailable,
+              let copy = menu.items.firstIndex(where: {
+                  $0.identifier?.rawValue == "WKMenuItemIdentifierCopy" || $0.title == "Copy"
+              }) else { return }
+        menu.insertItem(withTitle: "Read Aloud",
+                        action: #selector(BrowserWindowController.readAloud(_:)),
+                        keyEquivalent: "", at: copy + 1)
+    }
+
     override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {
         super.willOpenMenu(menu, with: event)
+        Self.addReadAloudItem(to: menu)
         Self.addInspectItem(to: menu)
     }
 }

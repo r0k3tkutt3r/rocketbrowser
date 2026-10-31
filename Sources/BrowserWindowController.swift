@@ -1449,6 +1449,20 @@ extension BrowserWindowController {
         callInspector("show")
     }
 
+    /// Right-click ▸ Read Aloud. Reads the top frame's selection; text selected inside
+    /// an iframe comes back empty and nothing happens.
+    @objc func readAloud(_ sender: Any?) {
+        // ponytail: main frame only; evaluate in every frame if iframe text matters.
+        webView.evaluateJavaScript("String(window.getSelection())") { [weak self] value, _ in
+            guard let self, let text = value as? String else { return }
+            ReadAloud.shared.speak(text, in: self.webView.superview ?? self.webView)
+        }
+    }
+
+    @objc func stopReadingAloud(_ sender: Any?) {
+        ReadAloud.shared.stop()
+    }
+
     @objc func showJavaScriptConsole(_ sender: Any?) {
         callInspector("showConsole")
     }

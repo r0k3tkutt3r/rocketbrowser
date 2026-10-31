@@ -113,6 +113,39 @@ sign_bundle() {
     fi
 }
 
+# Read Aloud's engine: Helpers/RocketSpeech, a SwiftPM package (the one third-party
+# dependency, kokoro-coreml) built into its own process. The first build fetches the
+# package and needs the Metal toolchain (`xcodebuild -downloadComponent MetalToolchain`);
+# if it cannot build, Rocket ships without Read Aloud rather than failing the build.
+# SwiftPM resource bundles and libMisakiSwift.dylib are looked up next to the
+# executable, so the folder is copied whole.
+HELPER="$APP/Contents/Helpers/RocketSpeech"
+if swift build -c release --package-path Helpers/RocketSpeech >build/speech.log 2>&1; then
+    BIN="$(swift build -c release --package-path Helpers/RocketSpeech --show-bin-path)"
+    mkdir -p "$HELPER"
+    for f in "$BIN/rocket-speech" "$BIN/libMisakiSwift.dylib" "$BIN"/*.bundle; do
+        ditto "$f" "$HELPER/${f:t}"
+    done
+else
+    echo "warning: the Read Aloud helper did not build (build/speech.log); Rocket ships without it."
+fi
+
+# Nested code is signed inside-out, before the app that seals it.
+sign_nested() {
+    if [[ -n "$SIGN_ID" ]]; then
+        codesign --force --sign "$SIGN_ID" --options runtime --timestamp "$1"
+    else
+        # No hardened runtime here: under it, an ad-hoc process refuses an ad-hoc dylib
+        # ("different Team IDs" — neither has one), so libMisakiSwift would not load.
+        codesign --force --sign - "$1"
+    fi
+}
+if [[ -d "$HELPER" ]]; then
+    for f in "$HELPER"/*.bundle "$HELPER/libMisakiSwift.dylib" "$HELPER/rocket-speech"; do
+        sign_nested "$f"
+    done
+fi
+
 if [[ -z "$SIGN_ID" ]]; then
     echo "warning: no Developer ID Application certificate for team $TEAM_ID in the keychain."
     echo "         Signing ad-hoc, which leaves library validation off — a modified copy"
