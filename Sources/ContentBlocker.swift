@@ -91,6 +91,9 @@ final class ContentBlocker {
         for script in PasswordAutofill.userScripts() {
             userContent.addUserScript(script)
         }
+        for script in Passkeys.userScripts() {
+            userContent.addUserScript(script)
+        }
         DarkMode.apply(to: webView)
         #endif
     }

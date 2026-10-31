@@ -54,6 +54,7 @@ final class BrowserWindowController: NSWindowController {
     private weak var passwordsButton: NSButton?
     private let saveBubblePopover = NSPopover()
     private(set) lazy var passwordAutofill = PasswordAutofillController(owner: self)
+    private(set) lazy var passkeys = PasskeyController(owner: self)
     private var downloadsObserver: NSObjectProtocol?
     /// Open history visit for the page on screen, closed when the tab navigates away.
     private var currentVisitID: UUID?
@@ -236,6 +237,9 @@ final class BrowserWindowController: NSWindowController {
         userContent.add(PasswordAutofillBridge.shared,
                         contentWorld: PasswordAutofill.world,
                         name: PasswordAutofill.handlerName)
+        // Passkeys answer `navigator.credentials` in the page's own world, with a reply.
+        userContent.removeScriptMessageHandler(forName: Passkeys.handlerName, contentWorld: .page)
+        userContent.addScriptMessageHandler(PasskeyBridge.shared, contentWorld: .page, name: Passkeys.handlerName)
 
         // Attention is only counted while Rocket itself is frontmost.
         let center = NotificationCenter.default

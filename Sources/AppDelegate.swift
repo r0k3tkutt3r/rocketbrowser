@@ -326,6 +326,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         PasswordFlows.importCSV(from: NSApp.keyWindow)
     }
 
+    @objc func importChromePasswords(_ sender: Any?) {
+        PasswordFlows.importFromChrome(from: NSApp.keyWindow)
+    }
+
     @objc func exportPasswords(_ sender: Any?) {
         PasswordFlows.exportCSV(from: NSApp.keyWindow)
     }
@@ -1172,7 +1176,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         let show = passwordsMenu.addItem(withTitle: "Show Passwords…",
                                          action: #selector(showPasswordsWindow(_:)), keyEquivalent: "p")
         show.keyEquivalentModifierMask = [.command, .option]
-        passwordsMenu.addItem(withTitle: "Import from CSV…",
+        passwordsMenu.addItem(withTitle: "Import from Chrome…",
+                              action: #selector(importChromePasswords(_:)), keyEquivalent: "")
+        passwordsMenu.addItem(withTitle: "Import from CSV (Apple Passwords, Chrome, Firefox)…",
                               action: #selector(importPasswords(_:)), keyEquivalent: "")
         passwordsMenu.addItem(withTitle: "Export to CSV…",
                               action: #selector(exportPasswords(_:)), keyEquivalent: "")

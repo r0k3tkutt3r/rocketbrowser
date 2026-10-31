@@ -307,7 +307,30 @@ final class PasswordsWindowController: NSWindowController, NSTableViewDataSource
     private let addButton = NSButton(title: "Add…", target: nil, action: nil)
     private let importButton = NSButton(title: "Import…", target: nil, action: nil)
     private let exportButton = NSButton(title: "Export…", target: nil, action: nil)
-    private var filtered: [PasswordEntry] = []
+    /// Passwords and passkeys share the list; only a password has a detail pane.
+    private enum Row {
+        case password(PasswordEntry)
+        case passkey(PasskeyEntry)
+
+        var id: UUID {
+            switch self { case .password(let e): return e.id; case .passkey(let p): return p.id }
+        }
+        var host: String {
+            switch self { case .password(let e): return e.host; case .passkey(let p): return p.rpID }
+        }
+        var username: String {
+            switch self { case .password(let e): return e.username; case .passkey(let p): return PasskeyController.label(p) }
+        }
+        var lastUsed: Date? {
+            switch self { case .password(let e): return e.lastUsed; case .passkey(let p): return p.lastUsed }
+        }
+        var password: PasswordEntry? {
+            if case .password(let entry) = self { return entry }
+            return nil
+        }
+    }
+
+    private var filtered: [Row] = []
     private var observer: NSObjectProtocol?
     private var lockObservers: [NSObjectProtocol] = []
 
@@ -454,9 +477,9 @@ final class PasswordsWindowController: NSWindowController, NSTableViewDataSource
         let store = PasswordStore.shared
         let selected = filtered.indices.filter { tableView.selectedRowIndexes.contains($0) }.map { filtered[$0].id }
         let query = searchField.stringValue.trimmingCharacters(in: .whitespaces).lowercased()
-        filtered = store.entriesLoaded
+        filtered = (store.entriesLoaded.map(Row.password) + store.passkeysLoaded.map(Row.passkey))
             .filter { query.isEmpty || $0.host.contains(query) || $0.username.lowercased().contains(query)
-                || ($0.title?.lowercased().contains(query) ?? false) }
+                || ($0.password?.title?.lowercased().contains(query) ?? false) }
             .sorted { (SiteMatcher.displayHost($0.host), $0.username.lowercased())
                     < (SiteMatcher.displayHost($1.host), $1.username.lowercased()) }
         tableView.reloadData()
@@ -500,7 +523,12 @@ final class PasswordsWindowController: NSWindowController, NSTableViewDataSource
         }()
         switch identifier.rawValue {
         case "site": cell.textField?.stringValue = SiteMatcher.displayHost(entry.host)
-        case "username": cell.textField?.stringValue = entry.username
+        case "username":
+            if case .passkey = entry {
+                cell.textField?.stringValue = "\(entry.username) · passkey"
+            } else {
+                cell.textField?.stringValue = entry.username
+            }
         default:
             cell.textField?.stringValue = entry.lastUsed.map { Self.relative.localizedString(for: $0, relativeTo: Date()) } ?? "—"
             cell.textField?.textColor = .secondaryLabelColor
@@ -516,11 +544,11 @@ final class PasswordsWindowController: NSWindowController, NSTableViewDataSource
 
     func tableViewSelectionDidChange(_ notification: Notification) {
         let rows = tableView.selectedRowIndexes
-        detail.show(rows.count == 1 ? filtered[rows.first!] : nil)
+        detail.show(rows.count == 1 ? filtered[rows.first!].password : nil)
     }
 
     private var selectedEntries: [PasswordEntry] {
-        tableView.selectedRowIndexes.map { filtered[$0] }
+        tableView.selectedRowIndexes.compactMap { filtered[$0].password }
     }
 
     // MARK: Actions
@@ -612,13 +640,17 @@ final class PasswordsWindowController: NSWindowController, NSTableViewDataSource
     }
 
     @objc private func deleteSelected() {
-        let entries = selectedEntries
+        let entries = tableView.selectedRowIndexes.map { filtered[$0] }
         guard !entries.isEmpty else { return }
         let alert = NSAlert()
+        let noun: String
+        if case .passkey = entries[0] { noun = "passkey" } else { noun = "password" }
         alert.messageText = entries.count == 1
-            ? "Delete the password for \(entries[0].username) at \(SiteMatcher.displayHost(entries[0].host))?"
-            : "Delete \(entries.count) passwords?"
-        alert.informativeText = "This can't be undone."
+            ? "Delete the \(noun) for \(entries[0].username) at \(SiteMatcher.displayHost(entries[0].host))?"
+            : "Delete \(entries.count) items?"
+        alert.informativeText = entries.contains(where: { $0.password == nil })
+            ? "This can't be undone. The site keeps its copy of the passkey's public key; remove it in the site's security settings too, or it may keep offering a passkey you no longer have."
+            : "This can't be undone."
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")

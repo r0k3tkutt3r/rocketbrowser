@@ -211,13 +211,54 @@ struct PasswordSecret: Codable, Equatable {
     var otpAuth: String?
 }
 
+/// A WebAuthn credential Rocket created and holds itself. Everything here is public
+/// to the relying party anyway, so it lives in the index and the sign-in sheet can list
+/// accounts without a prompt; the private key is in `VaultSecrets.passkeyKeys`.
+struct PasskeyEntry: Codable, Equatable {
+    let id: UUID
+    /// The relying party id the credential is scoped to ("github.com"), lowercased.
+    let rpID: String
+    let credentialID: Data
+    /// `user.id` as the site sent it. Returned with every assertion.
+    let userHandle: Data
+    var userName: String
+    var displayName: String?
+    let created: Date
+    var lastUsed: Date?
+}
+
+/// Both containers decode their newer keys with `decodeIfPresent`: a vault written
+/// before passkeys existed has no `passkeys` key, and the synthesized decoder would
+/// reject it as corrupt.
 struct VaultIndex: Codable {
     var entries: [PasswordEntry] = []
+    var passkeys: [PasskeyEntry] = []
+
+    init(entries: [PasswordEntry] = [], passkeys: [PasskeyEntry] = []) {
+        self.entries = entries
+        self.passkeys = passkeys
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        entries = try container.decode([PasswordEntry].self, forKey: .entries)
+        passkeys = try container.decodeIfPresent([PasskeyEntry].self, forKey: .passkeys) ?? []
+    }
 }
 
 /// Keyed by `uuidString`: a `[UUID: X]` dictionary encodes as a flat array in JSON.
 struct VaultSecrets: Codable {
     var byID: [String: PasswordSecret] = [:]
+    /// P-256 signing keys (raw 32-byte scalars) by `PasskeyEntry.id`.
+    var passkeyKeys: [String: Data] = [:]
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        byID = try container.decode([String: PasswordSecret].self, forKey: .byID)
+        passkeyKeys = try container.decodeIfPresent([String: Data].self, forKey: .passkeyKeys) ?? [:]
+    }
 
     subscript(id: UUID) -> PasswordSecret? {
         get { byID[id.uuidString] }

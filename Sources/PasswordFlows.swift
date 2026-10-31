@@ -171,7 +171,7 @@ enum PasswordFlows {
     static func importCSV(from window: NSWindow?) {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.commaSeparatedText, .plainText]
-        panel.message = "Choose a CSV exported from Apple Passwords, Chrome or Firefox."
+        panel.message = "Choose a CSV exported from Apple Passwords (File ▸ Export All Passwords to File), Chrome or Firefox."
         let handler: (NSApplication.ModalResponse) -> Void = { response in
             guard response == .OK, let url = panel.url else { return }
             importCSV(at: url, from: window)
@@ -193,9 +193,61 @@ enum PasswordFlows {
             run(alert, in: window) { _ in }
             return
         }
+        importCredentials(parsed, reason: "import passwords from \(url.lastPathComponent)", from: window, csv: url)
+    }
+
+    /// Chrome's own files, no CSV round trip. Reading its key raises the keychain's
+    /// consent dialog, which blocks, so the read runs off the main thread.
+    static func importFromChrome(from window: NSWindow?) {
+        let profiles = ChromeImport.profiles()
+        guard !profiles.isEmpty else {
+            let alert = NSAlert()
+            alert.messageText = "No Chrome Passwords Found"
+            alert.informativeText = "Rocket couldn't find a Chrome profile with saved passwords on this Mac."
+            run(alert, in: window) { _ in }
+            return
+        }
+        let intro = NSAlert()
+        intro.messageText = "Import Passwords from Chrome?"
+        intro.informativeText = """
+        macOS will ask whether Rocket may use "Chrome Safe Storage", the key Chrome encrypts \
+        its passwords with. Choose Allow (not Always Allow). Profiles: \
+        \(profiles.map(\.displayName).joined(separator: ", ")). Passkeys stay in Chrome: \
+        Chrome has no way to export them.
+        """
+        intro.addButton(withTitle: "Continue")
+        intro.addButton(withTitle: "Cancel")
+        run(intro, in: window) { response in
+            guard response == .alertFirstButtonReturn else { return }
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = Result { try ChromeImport.read(profiles: profiles) }
+                DispatchQueue.main.async {
+                    switch result {
+                    case .success(let parsed):
+                        importCredentials(parsed, reason: "import passwords from Chrome", from: window, csv: nil)
+                    case .failure(let error):
+                        let alert = NSAlert()
+                        alert.messageText = "Couldn't Read Chrome's Passwords"
+                        switch error as? ChromeImportError {
+                        case .notInstalled?: alert.informativeText = "Chrome's encryption key isn't in your keychain."
+                        case .keychainDenied?: alert.informativeText = "Access to Chrome Safe Storage was denied."
+                        case .unreadable(let detail)?: alert.informativeText = detail
+                        case nil: alert.informativeText = error.localizedDescription
+                        }
+                        run(alert, in: window) { _ in }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The merge every import source shares. `csv` is the plain-text file to offer to
+    /// trash afterwards, when there is one.
+    private static func importCredentials(_ parsed: ImportResult, reason: String,
+                                          from window: NSWindow?, csv url: URL?) {
         ensureSetUp(from: window) { ready in
             guard ready else { return }
-            PasswordStore.shared.mutate(reason: "import passwords from \(url.lastPathComponent)", { index, secrets -> (Int, Int, Int) in
+            PasswordStore.shared.mutate(reason: reason, { index, secrets -> (Int, Int, Int) in
                 let plan = PasswordImport.merge(parsed.credentials, into: index.entries) { secrets[$0]?.password }
                 for (entry, credential) in plan.updates {
                     guard let position = index.entries.firstIndex(where: { $0.id == entry.id }) else { continue }
@@ -224,6 +276,11 @@ enum PasswordFlows {
                     alert.messageText = "Import Finished"
                     var parts = ["Imported \(added)", "updated \(updated)", "skipped \(skipped) duplicate\(skipped == 1 ? "" : "s")"]
                     if parsed.unreadableRows > 0 { parts.append("\(parsed.unreadableRows) row\(parsed.unreadableRows == 1 ? "" : "s") unreadable") }
+                    guard let url else {
+                        alert.informativeText = parts.joined(separator: ", ") + "."
+                        run(alert, in: window) { _ in }
+                        return
+                    }
                     alert.informativeText = parts.joined(separator: ", ") + ".\n\nThe CSV still holds every password in plain text. Move it to the Trash? (The Trash is not a secure erase — empty it, and remember other copies may exist.)"
                     alert.addButton(withTitle: "Move to Trash")
                     alert.addButton(withTitle: "Keep File")

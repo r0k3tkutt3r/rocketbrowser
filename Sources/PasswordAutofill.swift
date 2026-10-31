@@ -678,7 +678,10 @@ final class PasswordAutofillController {
         focused = field
 
         let store = PasswordStore.shared
-        var items: [PasswordDropdownItem] = []
+        // A page waiting on a conditional passkey request gets its passkeys first, the
+        // way Safari and Chrome list them above passwords.
+        var items: [PasswordDropdownItem] = field.kind == "password" ? []
+            : owner.passkeys.conditionalOffers(forFrameHost: frame.securityOrigin.host).map { .passkey($0) }
         // A password handed to an unencrypted page goes out over the wire in clear
         // text, to whoever is listening. A warning row was not enough: it left the
         // decision with someone who has no way to judge it. Loopback is exempt because
@@ -811,6 +814,8 @@ final class PasswordAutofillController {
                     self.markUsedIfRecorded(entry.id)
                 }
             }
+        case .passkey(let passkey):
+            owner.passkeys.acceptConditional(passkey)
         case .strongPassword:
             let generated = PasswordGenerator.make()
             // Never submitted: a sign-up form still needs the rest of its boxes.

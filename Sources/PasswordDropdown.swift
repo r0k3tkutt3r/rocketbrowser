@@ -2,6 +2,7 @@ import Cocoa
 
 enum PasswordDropdownItem {
     case account(PasswordEntry, showsHost: Bool)
+    case passkey(PasskeyEntry)
     case strongPassword
     case manage
     case caption(String)
@@ -74,6 +75,10 @@ final class PasswordDropdownRow: NSView {
             symbol = "person.crop.circle"
             title = entry.username.isEmpty ? "(no username)" : entry.username
             subtitle = showsHost ? SiteMatcher.displayHost(entry.host) : ""
+        case .passkey(let passkey):
+            symbol = "person.badge.key"
+            title = PasskeyController.label(passkey)
+            subtitle = "Passkey"
         case .strongPassword:
             symbol = "wand.and.stars"
             title = "Use Strong Password"

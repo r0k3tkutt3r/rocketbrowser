@@ -86,7 +86,8 @@ final class PasswordStore {
 
     private var file: VaultFile?
     private var indexKey: SymmetricKey?
-    private(set) var entries: [PasswordEntry] = []
+    private var index = VaultIndex()
+    var entries: [PasswordEntry] { index.entries }
     /// passwords.vault exists but this Mac's enclave cannot open its silent key: the
     /// one check that needs no prompt, and a blob from another enclave always fails it.
     private(set) var needsRestore = false
@@ -124,6 +125,15 @@ final class PasswordStore {
         return entries.first { $0.id == id }
     }
 
+    var passkeysLoaded: [PasskeyEntry] { load(); return index.passkeys }
+
+    /// Passkeys whose relying party id this host may use, most recently used first.
+    func passkeys(forRPID rpID: String) -> [PasskeyEntry] {
+        load()
+        return index.passkeys.filter { $0.rpID == rpID }
+            .sorted { ($0.lastUsed ?? $0.created) > ($1.lastUsed ?? $1.created) }
+    }
+
     /// Opens the index with the silent enclave key. Synchronous on purpose: it never
     /// prompts, it happens once, and the menus and dropdown ask for `entries` inline.
     ///
@@ -148,7 +158,7 @@ final class PasswordStore {
         do {
             let key = try VaultCrypto.unwrap(decoded.silent, enclave: enclave, context: nil, aad: VaultAAD.silent)
             let indexData = try VaultCrypto.open(decoded.index, key: key, aad: VaultAAD.index)
-            entries = try VaultCrypto.decode(VaultIndex.self, from: indexData).entries
+            index = try VaultCrypto.decode(VaultIndex.self, from: indexData)
             indexKey = key
         } catch {
             needsRestore = true
@@ -209,7 +219,7 @@ final class PasswordStore {
                                 }
                                 self.file = draft
                                 self.indexKey = newIndexKey
-                                self.entries = []
+                                self.index = VaultIndex()
                                 self.needsRestore = false
                                 self.cache(vaultKey)
                                 NotificationCenter.default.post(name: .passwordsDidChange, object: self)
@@ -321,30 +331,30 @@ final class PasswordStore {
                     completion(.failure(.notSetUp))
                     return
                 }
-                let currentEntries = self.entries
-                self.onQueue({ () -> (T, VaultFile?, [PasswordEntry]) in
+                let currentIndex = self.index
+                self.onQueue({ () -> (T, VaultFile?, VaultIndex) in
                     var secretsData = try VaultCrypto.open(file.secrets, key: key, aad: VaultAAD.secrets)
                     defer { secretsData.resetBytes(in: 0..<secretsData.count) }
                     var secrets = try VaultCrypto.decode(VaultSecrets.self, from: secretsData)
-                    var index = VaultIndex(entries: currentEntries)
+                    var index = currentIndex
                     let value = try body(&index, &secrets)
                     var newSecrets = try VaultCrypto.encode(secrets)
                     defer { newSecrets.resetBytes(in: 0..<newSecrets.count) }
                     let newIndex = try VaultCrypto.encode(index)
-                    let oldIndex = try VaultCrypto.encode(VaultIndex(entries: currentEntries))
+                    let oldIndex = try VaultCrypto.encode(currentIndex)
                     guard newSecrets != secretsData || newIndex != oldIndex else {
-                        return (value, nil, currentEntries)
+                        return (value, nil, currentIndex)
                     }
                     var updated = file
                     updated.secrets = try VaultCrypto.seal(newSecrets, key: key, aad: VaultAAD.secrets)
                     updated.index = try VaultCrypto.seal(newIndex, key: indexKey, aad: VaultAAD.index)
                     updated.modified = Date()
-                    return (value, updated, index.entries)
+                    return (value, updated, index)
                 }, then: { outcome in
                     switch outcome {
                     case .failure(let error):
                         completion(.failure(error))
-                    case .success(let (value, updatedFile, updatedEntries)):
+                    case .success(let (value, updatedFile, updatedIndex)):
                         guard let updatedFile else { completion(.success(value)); return }
                         // Written here rather than on the crypto queue so that the main
                         // thread is the single point that touches `file`, `entries` and
@@ -359,7 +369,7 @@ final class PasswordStore {
                             return
                         }
                         self.file = updatedFile
-                        self.entries = updatedEntries
+                        self.index = updatedIndex
                         NotificationCenter.default.post(name: .passwordsDidChange, object: self)
                         completion(.success(value))
                     }
@@ -407,7 +417,11 @@ final class PasswordStore {
     func delete(ids: Set<UUID>, reason: String, completion: @escaping (Result<Void, VaultError>) -> Void) {
         mutate(reason: reason, { index, secrets in
             index.entries.removeAll { ids.contains($0.id) }
-            for id in ids { secrets[id] = nil }
+            index.passkeys.removeAll { ids.contains($0.id) }
+            for id in ids {
+                secrets[id] = nil
+                secrets.passkeyKeys[id.uuidString] = nil
+            }
         }, completion: completion)
     }
 
@@ -415,15 +429,20 @@ final class PasswordStore {
     /// enough (one small AES-GCM seal and a write) to stay synchronous.
     func markUsed(id: UUID) {
         load()
-        guard let position = entries.firstIndex(where: { $0.id == id }) else { return }
-        entries[position].lastUsed = Date()
+        if let position = index.entries.firstIndex(where: { $0.id == id }) {
+            index.entries[position].lastUsed = Date()
+        } else if let position = index.passkeys.firstIndex(where: { $0.id == id }) {
+            index.passkeys[position].lastUsed = Date()
+        } else {
+            return
+        }
         try? resealIndex()
         NotificationCenter.default.post(name: .passwordsDidChange, object: self)
     }
 
     private func resealIndex() throws {
         guard var file, let indexKey else { throw VaultError.notSetUp }
-        file.index = try VaultCrypto.seal(try VaultCrypto.encode(VaultIndex(entries: entries)),
+        file.index = try VaultCrypto.seal(try VaultCrypto.encode(index),
                                           key: indexKey, aad: VaultAAD.index)
         file.modified = Date()
         try write(file)
@@ -529,7 +548,7 @@ final class PasswordStore {
                                 }
                                 self.file = draft
                                 self.indexKey = restoredIndexKey
-                                self.entries = index.entries
+                                self.index = index
                                 self.needsRestore = false
                                 self.loaded = true
                                 NotificationCenter.default.post(name: .passwordsDidChange, object: self)
