@@ -59,6 +59,7 @@ enum VaultError: LocalizedError {
     case cancelled
     case authenticationFailed(Error?)
     case corrupt
+    case tampered
     case wrongRecoveryKey
     case enclave(Error)
     case io(Error)
@@ -67,11 +68,12 @@ enum VaultError: LocalizedError {
         switch self {
         case .notSetUp: return "Rocket Passwords hasn't been set up yet."
         case .enclaveUnavailable: return "Rocket Passwords needs a Mac with a Secure Enclave."
-        case .enclaveKeyUnusable: return "This vault was created on another Mac. Restore it with your recovery key."
+        case .enclaveKeyUnusable: return "This vault needs your recovery key. It came from another Mac, uses an older format, or was changed outside Rocket."
         case .authenticationRequired: return "Authentication is required."
         case .cancelled: return "Cancelled."
         case .authenticationFailed(let error): return error?.localizedDescription ?? "Authentication failed."
         case .corrupt: return "The password vault is damaged."
+        case .tampered: return "The password vault was changed outside Rocket, so nothing was opened or saved. Restore it with your recovery key."
         case .wrongRecoveryKey: return "That recovery key doesn't open this vault."
         case .enclave(let error): return "Secure Enclave error: \(error.localizedDescription)"
         case .io(let error): return error.localizedDescription
@@ -230,7 +232,7 @@ struct PasskeyEntry: Codable, Equatable {
 /// Both containers decode their newer keys with `decodeIfPresent`: a vault written
 /// before passkeys existed has no `passkeys` key, and the synthesized decoder would
 /// reject it as corrupt.
-struct VaultIndex: Codable {
+struct VaultIndex: Codable, Equatable {
     var entries: [PasswordEntry] = []
     var passkeys: [PasskeyEntry] = []
 
@@ -244,6 +246,16 @@ struct VaultIndex: Codable {
         entries = try container.decode([PasswordEntry].self, forKey: .entries)
         passkeys = try container.decodeIfPresent([PasskeyEntry].self, forKey: .passkeys) ?? []
     }
+
+    /// What `VaultSecrets.sealedIndex` holds. `lastUsed` is left out because `markUsed`
+    /// writes it with no key in hand, which is the whole reason the index can be touched
+    /// without a prompt.
+    var withoutUsage: VaultIndex {
+        var copy = self
+        for i in copy.entries.indices { copy.entries[i].lastUsed = nil }
+        for i in copy.passkeys.indices { copy.passkeys[i].lastUsed = nil }
+        return copy
+    }
 }
 
 /// Keyed by `uuidString`: a `[UUID: X]` dictionary encodes as a flat array in JSON.
@@ -251,6 +263,10 @@ struct VaultSecrets: Codable {
     var byID: [String: PasswordSecret] = [:]
     /// P-256 signing keys (raw 32-byte scalars) by `PasskeyEntry.id`.
     var passkeyKeys: [String: Data] = [:]
+    /// The authoritative copy of the index. `VaultFile.index` opens with a key any local
+    /// process can use without a prompt, so it can be rewritten to point a saved password
+    /// at another site. Every open compares the two before anything is released.
+    var sealedIndex: VaultIndex?
 
     init() {}
 
@@ -258,6 +274,7 @@ struct VaultSecrets: Codable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         byID = try container.decode([String: PasswordSecret].self, forKey: .byID)
         passkeyKeys = try container.decodeIfPresent([String: Data].self, forKey: .passkeyKeys) ?? [:]
+        sealedIndex = try container.decodeIfPresent(VaultIndex.self, forKey: .sealedIndex)
     }
 
     subscript(id: UUID) -> PasswordSecret? {
@@ -267,7 +284,10 @@ struct VaultSecrets: Codable {
 }
 
 struct VaultFile: Codable {
-    static let currentVersion = 1
+    /// Version 1 wrapped K to the gated key's public half, which anyone can do. It opens
+    /// only through `restore`: accepting it elsewhere would let a forged file claim to
+    /// be old.
+    static let currentVersion = 2
 
     let version: Int
     var gated: EnclaveWrap              // K, needs Touch ID / password
@@ -301,6 +321,9 @@ protocol EnclaveProvider {
     func publicKey(for blob: Data) throws -> Data
     /// ECDH with the enclave's private half. A gated key needs an authenticated context.
     func sharedSecret(blob: Data, ephemeralPublic: Data, context: LAContext?) throws -> SharedSecret
+    /// True when the key answers with no authentication at all. Never prompts. A gated
+    /// slot holding such a key is a planted one.
+    func usableWithoutPresence(blob: Data) -> Bool
 }
 
 /// The real thing. CryptoKit's enclave keys need no entitlement (unlike the Security
@@ -351,12 +374,29 @@ struct SecureEnclaveProvider: EnclaveProvider {
             throw VaultError.enclave(error)
         }
     }
+
+    func usableWithoutPresence(blob: Data) -> Bool {
+        let quiet = LAContext()
+        quiet.interactionNotAllowed = true
+        return (try? sharedSecret(blob: blob, ephemeralPublic: VaultCrypto.gatedPeer, context: quiet)) != nil
+    }
 }
 
 // MARK: - Crypto
 
 enum VaultCrypto {
     private static let wrapInfo = Data("rocket.vault.wrap".utf8)
+    private static let gatedWrapInfo = Data("rocket.vault.wrap.gated.v2".utf8)
+    /// The public half of a P-256 key whose private half was discarded the moment it was
+    /// generated. Only the gated key's private half can agree with this point, so unlike
+    /// `wrap`, a gated wrap cannot be made from public data: writing one takes the same
+    /// authentication as reading one. It is a constant and never read from the file,
+    /// because a peer stored in the file is a peer an attacker chooses.
+    static let gatedPeer = Data((0..<64).map { i -> UInt8 in
+        let hex = Array("7ccba91214e40984e05ae3cd9d9ad7dc18d8532a11daf80daef3e913ea1ac8f4efca3fdc49ef4de0b8b78b308efe88297be707049e276a1fbd7d5f7ccd8af375".utf8)
+        func nibble(_ c: UInt8) -> UInt8 { c >= 97 ? c - 87 : c - 48 }
+        return nibble(hex[i * 2]) << 4 | nibble(hex[i * 2 + 1])
+    })
     static let recoveryIterations = 1_000_000
 
     static func seal(_ plaintext: Data, key: SymmetricKey, aad: String) throws -> Data {
@@ -374,9 +414,27 @@ enum VaultCrypto {
         } catch { throw VaultError.corrupt }
     }
 
+    private static func gatedWrapKey(blob: Data, enclave: EnclaveProvider, context: LAContext?) throws -> SymmetricKey {
+        try enclave.sharedSecret(blob: blob, ephemeralPublic: gatedPeer, context: context)
+            .hkdfDerivedSymmetricKey(using: SHA256.self, salt: gatedPeer,
+                                     sharedInfo: gatedWrapInfo, outputByteCount: 32)
+    }
+
+    static func wrapGated(_ secret: SymmetricKey, blob: Data, enclave: EnclaveProvider, context: LAContext?) throws -> EnclaveWrap {
+        let key = try gatedWrapKey(blob: blob, enclave: enclave, context: context)
+        let sealed = try seal(secret.withUnsafeBytes { Data($0) }, key: key, aad: VaultAAD.gated)
+        return EnclaveWrap(keyBlob: blob, ephemeralPublicKey: gatedPeer, sealed: sealed)
+    }
+
+    static func unwrapGated(_ wrap: EnclaveWrap, enclave: EnclaveProvider, context: LAContext?) throws -> SymmetricKey {
+        let key = try gatedWrapKey(blob: wrap.keyBlob, enclave: enclave, context: context)
+        return SymmetricKey(data: try open(wrap.sealed, key: key, aad: VaultAAD.gated))
+    }
+
     /// ECIES-style: an ephemeral P-256 key agrees with the enclave key's public half;
     /// HKDF of that shared secret seals the payload. Only the enclave's private half
-    /// can recompute it.
+    /// can recompute it, but anyone can produce one, so this only suits the silent key,
+    /// which protects nothing a local process could not already reach.
     static func wrap(_ secret: SymmetricKey, blob: Data, enclave: EnclaveProvider, aad: String) throws -> EnclaveWrap {
         let ephemeral = P256.KeyAgreement.PrivateKey()
         let enclavePublic: P256.KeyAgreement.PublicKey

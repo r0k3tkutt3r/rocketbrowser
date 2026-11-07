@@ -487,7 +487,7 @@ final class PasswordsWindowController: NSWindowController, NSTableViewDataSource
         tableView.selectRowIndexes(restored, byExtendingSelection: false)
 
         if store.needsRestore {
-            emptyLabel.stringValue = "This vault was created on another Mac. Use Tools → Passwords → Restore from Recovery Key…"
+            emptyLabel.stringValue = "This vault needs your recovery key. Use Tools → Passwords → Restore from Recovery Key…"
         } else if !store.isSetUp {
             emptyLabel.stringValue = "No passwords saved yet.\nAdd one, import a CSV, or sign in to a site and choose Save."
         } else if filtered.isEmpty {

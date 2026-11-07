@@ -155,6 +155,11 @@ final class PasswordStore {
             return
         }
         file = decoded
+        guard decoded.version == VaultFile.currentVersion,
+              !enclave.usableWithoutPresence(blob: decoded.gated.keyBlob) else {
+            needsRestore = true
+            return
+        }
         do {
             let key = try VaultCrypto.unwrap(decoded.silent, enclave: enclave, context: nil, aad: VaultAAD.silent)
             let indexData = try VaultCrypto.open(decoded.index, key: key, aad: VaultAAD.index)
@@ -168,8 +173,8 @@ final class PasswordStore {
     // MARK: Setup
 
     /// Creates the vault and returns the recovery key, which is shown exactly once.
-    /// The gated wrap is opened (one authentication) before anything is written: a
-    /// vault that could never be unlocked must not be saved.
+    /// The gated wrap is made and opened (one authentication) before anything is
+    /// written: a vault that could never be unlocked must not be saved.
     func setUp(completion: @escaping (Result<String, VaultError>) -> Void) {
         load()
         guard enclave.isAvailable else { completion(.failure(.enclaveUnavailable)); return }
@@ -203,21 +208,19 @@ final class PasswordStore {
                         // own dialog); the write happens on main, where every other
                         // write to this file happens.
                         self.onQueue({
-                            let opened = try VaultCrypto.unwrap(draft.gated, enclave: self.enclave,
-                                                                context: context, aad: VaultAAD.gated)
-                            guard opened == vaultKey else { throw VaultError.corrupt }
+                            try self.sealingGatedWrap(of: draft, vaultKey: vaultKey, context: context)
                         }, then: { writeResult in
                             switch writeResult {
                             case .failure(let error):
                                 completion(.failure(error))
-                            case .success:
+                            case .success(let sealed):
                                 do {
-                                    try self.write(draft)
+                                    try self.write(sealed)
                                 } catch {
                                     completion(.failure(Self.wrap(error)))
                                     return
                                 }
-                                self.file = draft
+                                self.file = sealed
                                 self.indexKey = newIndexKey
                                 self.index = VaultIndex()
                                 self.needsRestore = false
@@ -236,9 +239,12 @@ final class PasswordStore {
                           index: VaultIndex, secrets: VaultSecrets, iterations: Int) throws -> VaultFile {
         let gatedBlob = try enclave.makeKey(gated: true)
         let silentBlob = try enclave.makeKey(gated: false)
+        var secrets = secrets
+        secrets.sealedIndex = index.withoutUsage
         return VaultFile(
             version: VaultFile.currentVersion,
-            gated: try VaultCrypto.wrap(vaultKey, blob: gatedBlob, enclave: enclave, aad: VaultAAD.gated),
+            // Empty until `sealingGatedWrap`: making it takes an authenticated context.
+            gated: EnclaveWrap(keyBlob: gatedBlob, ephemeralPublicKey: VaultCrypto.gatedPeer, sealed: Data()),
             silent: try VaultCrypto.wrap(indexKey, blob: silentBlob, enclave: enclave, aad: VaultAAD.silent),
             recovery: try VaultCrypto.sealRecovery(vaultKey, recoveryKeyBytes: recoveryKeyBytes,
                                                    iterations: iterations),
@@ -247,6 +253,16 @@ final class PasswordStore {
             index: try VaultCrypto.seal(try VaultCrypto.encode(index), key: indexKey, aad: VaultAAD.index),
             secrets: try VaultCrypto.seal(try VaultCrypto.encode(secrets), key: vaultKey, aad: VaultAAD.secrets),
             modified: Date())
+    }
+
+    private func sealingGatedWrap(of draft: VaultFile, vaultKey: SymmetricKey, context: LAContext?) throws -> VaultFile {
+        var sealed = draft
+        sealed.gated = try VaultCrypto.wrapGated(vaultKey, blob: draft.gated.keyBlob,
+                                                 enclave: enclave, context: context)
+        guard try VaultCrypto.unwrapGated(sealed.gated, enclave: enclave, context: context) == vaultKey else {
+            throw VaultError.corrupt
+        }
+        return sealed
     }
 
     /// Runs `work` on the crypto queue and delivers its result on the main thread.
@@ -279,14 +295,25 @@ final class PasswordStore {
                 completion(.failure(error))
             case .success(let context):
                 self.onQueue({
-                    try VaultCrypto.unwrap(file.gated, enclave: self.enclave,
-                                           context: context, aad: VaultAAD.gated)
+                    do {
+                        return try VaultCrypto.unwrapGated(file.gated, enclave: self.enclave, context: context)
+                    } catch VaultError.corrupt {
+                        // Authenticated, and the wrap still would not open: it was not
+                        // made by this key.
+                        throw VaultError.tampered
+                    }
                 }, then: { unwrapped in
                     if case .success(let key) = unwrapped { self.cache(key) }
+                    if case .failure(.tampered) = unwrapped { self.requireRestore() }
                     completion(unwrapped)
                 })
             }
         }
+    }
+
+    private func requireRestore() {
+        needsRestore = true
+        NotificationCenter.default.post(name: .passwordsDidChange, object: self)
     }
 
     private func cache(_ key: SymmetricKey) {
@@ -336,8 +363,10 @@ final class PasswordStore {
                     var secretsData = try VaultCrypto.open(file.secrets, key: key, aad: VaultAAD.secrets)
                     defer { secretsData.resetBytes(in: 0..<secretsData.count) }
                     var secrets = try VaultCrypto.decode(VaultSecrets.self, from: secretsData)
+                    guard secrets.sealedIndex == currentIndex.withoutUsage else { throw VaultError.tampered }
                     var index = currentIndex
                     let value = try body(&index, &secrets)
+                    secrets.sealedIndex = index.withoutUsage
                     var newSecrets = try VaultCrypto.encode(secrets)
                     defer { newSecrets.resetBytes(in: 0..<newSecrets.count) }
                     let newIndex = try VaultCrypto.encode(index)
@@ -353,6 +382,7 @@ final class PasswordStore {
                 }, then: { outcome in
                     switch outcome {
                     case .failure(let error):
+                        if case .tampered = error { self.requireRestore() }
                         completion(.failure(error))
                     case .success(let (value, updatedFile, updatedIndex)):
                         guard let updatedFile else { completion(.success(value)); return }
@@ -507,10 +537,19 @@ final class PasswordStore {
             let vaultKey = try VaultCrypto.openRecovery(existing.recovery, recoveryKeyBytes: bytes)
             let restoredIndexKey = SymmetricKey(data: try VaultCrypto.open(
                 existing.indexKeyUnderVaultKey, key: vaultKey, aad: VaultAAD.indexKey))
-            let index = try VaultCrypto.decode(VaultIndex.self, from: try VaultCrypto.open(
-                existing.index, key: restoredIndexKey, aad: VaultAAD.index))
             let secrets = try VaultCrypto.decode(VaultSecrets.self, from: try VaultCrypto.open(
                 existing.secrets, key: vaultKey, aad: VaultAAD.secrets))
+            let filed = try? VaultCrypto.decode(VaultIndex.self, from: try VaultCrypto.open(
+                existing.index, key: restoredIndexKey, aad: VaultAAD.index))
+            let index: VaultIndex
+            if let sealed = secrets.sealedIndex {
+                // The filed copy is only wanted for its `lastUsed` dates.
+                index = filed?.withoutUsage == sealed ? filed! : sealed
+            } else if let filed {
+                index = filed   // a version 1 vault, which has nothing better
+            } else {
+                throw VaultError.corrupt
+            }
             var rebuilt = try self.makeFile(vaultKey: vaultKey, indexKey: restoredIndexKey,
                                             recoveryKeyBytes: bytes, index: index, secrets: secrets,
                                             iterations: iterations)
@@ -532,21 +571,19 @@ final class PasswordStore {
                         // own dialog); the write happens on main, where every other
                         // write to this file happens.
                         self.onQueue({
-                            let opened = try VaultCrypto.unwrap(draft.gated, enclave: self.enclave,
-                                                                context: context, aad: VaultAAD.gated)
-                            guard opened == vaultKey else { throw VaultError.corrupt }
+                            try self.sealingGatedWrap(of: draft, vaultKey: vaultKey, context: context)
                         }, then: { writeResult in
                             switch writeResult {
                             case .failure(let error):
                                 completion(.failure(error))
-                            case .success:
+                            case .success(let sealed):
                                 do {
-                                    try self.write(draft)
+                                    try self.write(sealed)
                                 } catch {
                                     completion(.failure(Self.wrap(error)))
                                     return
                                 }
-                                self.file = draft
+                                self.file = sealed
                                 self.indexKey = restoredIndexKey
                                 self.index = index
                                 self.needsRestore = false

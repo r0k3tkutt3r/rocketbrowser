@@ -142,7 +142,7 @@ enum PasswordFlows {
         let alert = NSAlert()
         alert.messageText = "Restore Rocket Passwords"
         alert.informativeText = """
-        This vault was created on another Mac, or before this one was erased. Enter your \
+        This vault needs your recovery key: it came from another Mac, uses an older format, or was changed outside Rocket. Enter your \
         recovery key to use it here.
         """
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
